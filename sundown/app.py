@@ -243,7 +243,8 @@ class SourceRow(QWidget):
         if first and first.progress >= 0:
             self.bar.setValue(int(first.progress * 1000))
         if st.error:
-            self.setToolTip(detail)
+            self.setToolTip(detail + (f"<br><small>{html.escape(st.detail)}</small>"
+                                      if st.detail else ""))
             return
         self.setToolTip("<br>".join(f"{html.escape(i.name)} {i.progress * 100:.0f}%"
                                     if i.progress >= 0 else html.escape(i.name)
@@ -298,7 +299,12 @@ class QbitDialog(QDialog):
             n = len(client.torrents())
             self.result.setText(self.win.tr_("qbit_ok", n=n))
         except watchers.QbitError as e:
-            self.result.setText(self.win.tr_(e.key))
+            # The raw reason (e.g. "Connection refused") tells a closed Web UI from a
+            # wrong port or address.
+            text = self.win.tr_(e.key)
+            if e.detail:
+                text += f"<br><small>{html.escape(e.detail)}</small>"
+            self.result.setText(text)
 
     def save(self):
         s = self.win.settings
