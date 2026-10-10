@@ -242,6 +242,9 @@ class SourceRow(QWidget):
         self.bar.setVisible(bool(first and first.progress >= 0))
         if first and first.progress >= 0:
             self.bar.setValue(int(first.progress * 1000))
+        if st.error:
+            self.setToolTip(detail)
+            return
         self.setToolTip("<br>".join(f"{html.escape(i.name)} {i.progress * 100:.0f}%"
                                     if i.progress >= 0 else html.escape(i.name)
                                     for i in st.items))
