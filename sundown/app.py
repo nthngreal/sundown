@@ -6,21 +6,44 @@ import os
 import sys
 import time
 
-from PySide6.QtCore import QSettings, Qt, QThread, QTime, QTimer, Signal
+from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTime, QTimer, Signal
 from PySide6.QtDBus import QDBusConnection, QDBusInterface
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-                               QDialogButtonBox, QFormLayout, QGridLayout, QGroupBox,
+                               QDialogButtonBox, QFormLayout, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
-                               QProgressBar, QPushButton, QRadioButton, QSizePolicy, QSpinBox,
-                               QSystemTrayIcon, QTimeEdit, QVBoxLayout, QWidget)
+                               QProgressBar, QPushButton, QSizePolicy, QSpinBox,
+                               QStackedWidget, QSystemTrayIcon, QTimeEdit, QToolButton,
+                               QVBoxLayout, QWidget)
 
-from . import desktop, power, watchers
+from . import desktop, power, theme, watchers
 from .i18n import LANGS, STRINGS
 
 POLL_SEC = 3
 COUNTDOWN_SEC = int(os.environ.get("SUNDOWN_COUNTDOWN", "60"))
 MODES = ("downloads", "in", "at", "now")
+ACTION_ICONS = {"poweroff": "power.svg", "reboot": "restart.svg", "suspend": "moon.svg"}
+PRESETS = (15, 30, 60, 120)
+
+
+def label(text="", name=None, wrap=False):
+    lbl = QLabel(text)
+    if name:
+        lbl.setObjectName(name)
+    lbl.setWordWrap(wrap)
+    return lbl
+
+
+def card(name="card"):
+    f = QFrame()
+    f.setObjectName(name)
+    return f
+
+
+def divider():
+    f = QFrame()
+    f.setObjectName("divider")
+    return f
 
 
 def fmt_left(sec):
@@ -111,32 +134,42 @@ class Countdown(QDialog):
         self.setWindowTitle(win.tr_("countdown_title"))
         self.setWindowIcon(QIcon(desktop.ICON))
         self.setWindowFlag(Qt.WindowStaysOnTopHint)
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(380)
         lay = QVBoxLayout(self)
-        self.label = QLabel()
-        self.label.setAlignment(Qt.AlignCenter)
+        lay.setContentsMargins(28, 24, 28, 22)
+        lay.setSpacing(6)
+        self.caption = label(win.tr_("in_label", action=action_text).upper(), "section")
+        self.caption.setAlignment(Qt.AlignCenter)
+        self.number = label("", "big")
+        self.number.setAlignment(Qt.AlignCenter)
+        self.unit = label(win.tr_("seconds"), "muted")
+        self.unit.setAlignment(Qt.AlignCenter)
         self.bar = QProgressBar()
+        self.bar.setObjectName("countdown")
         self.bar.setRange(0, COUNTDOWN_SEC)
         self.bar.setTextVisible(False)
-        btns = QDialogButtonBox()
-        self.now_btn = btns.addButton(win.tr_("do_now", action=action_text),
-                                      QDialogButtonBox.AcceptRole)
-        self.cancel_btn = btns.addButton(win.tr_("cancel"), QDialogButtonBox.RejectRole)
+        self.cancel_btn = QPushButton(win.tr_("cancel"))
+        self.cancel_btn.setObjectName("primary")
         self.cancel_btn.setDefault(True)    # Enter or Esc never turns the computer off
-        self.cancel_btn.setFocus()
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(self.label)
+        self.now_btn = QPushButton(win.tr_("do_now", action=action_text))
+        self.cancel_btn.clicked.connect(self.reject)
+        self.now_btn.clicked.connect(self.accept)
+        lay.addWidget(self.caption)
+        lay.addWidget(self.number)
+        lay.addWidget(self.unit)
+        lay.addSpacing(10)
         lay.addWidget(self.bar)
-        lay.addWidget(btns)
+        lay.addSpacing(14)
+        lay.addWidget(self.cancel_btn)
+        lay.addWidget(self.now_btn)
+        self.cancel_btn.setFocus()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(1000)
         self.update_text()
 
     def update_text(self):
-        self.label.setText("<h3>" + self.win.tr_("countdown_text", action=self.action_text,
-                                                  sec=self.left) + "</h3>")
+        self.number.setText(str(self.left))
         self.bar.setValue(self.left)
 
     def tick(self):
@@ -148,6 +181,72 @@ class Countdown(QDialog):
             self.update_text()
 
 
+class SourceRow(QWidget):
+    """One watched program: checkbox, state chip, what is downloading, progress."""
+
+    def __init__(self, extra=None):
+        super().__init__()
+        g = QGridLayout(self)
+        g.setContentsMargins(0, 0, 0, 0)
+        g.setVerticalSpacing(6)
+        self.check = QCheckBox()
+        self.check.setObjectName("source")
+        self.chip = label()
+        self.detail = label("", "detail")
+        # One line; a long text must not stretch the window.
+        self.detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.detail.setContentsMargins(30, 0, 0, 0)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setTextVisible(False)
+        bar_box = QHBoxLayout()
+        bar_box.setContentsMargins(30, 0, 0, 0)
+        bar_box.addWidget(self.bar)
+        g.addWidget(self.check, 0, 0)
+        g.setColumnStretch(1, 1)
+        if extra:
+            g.addWidget(extra, 0, 2)
+        g.addWidget(self.chip, 0, 3)
+        g.addWidget(self.detail, 1, 0, 1, 4)
+        g.addLayout(bar_box, 2, 0, 1, 4)
+        # Keep the rows' space when hidden, so the window does not jump as downloads
+        # start and stop.
+        for w in (self.detail, self.bar):
+            pol = w.sizePolicy()
+            pol.setRetainSizeWhenHidden(True)
+            w.setSizePolicy(pol)
+            w.hide()
+
+    def show_status(self, win, st):
+        if st is None:
+            self.chip.clear()
+            self.detail.hide()
+            self.bar.hide()
+            self.setToolTip("")
+            return
+        if st.error:
+            chip, color, detail = "chip_err", theme.ERR, win.tr_(st.error)
+        elif not st.running:
+            chip, color, detail = "chip_off", theme.MUTED, ""
+        elif not st.active:
+            chip, color, detail = "chip_idle", theme.MUTED, ""
+        else:
+            chip, color, detail = "chip_active", theme.OK, win.describe_items(st)
+        self.chip.setText(f"<span style='color:{color}'>●</span>&nbsp;"
+                          f"<span style='color:{color if chip != 'chip_off' else theme.MUTED}'>"
+                          f"{win.tr_(chip)}</span>")
+        self.detail.setText(f"<span style='color:{theme.ERR}'>{detail}</span>"
+                            if st.error else detail)
+        self.detail.setVisible(bool(detail))
+        first = st.items[0] if st.active and st.items else None
+        self.bar.setVisible(bool(first and first.progress >= 0))
+        if first and first.progress >= 0:
+            self.bar.setValue(int(first.progress * 1000))
+        self.setToolTip("<br>".join(f"{html.escape(i.name)} {i.progress * 100:.0f}%"
+                                    if i.progress >= 0 else html.escape(i.name)
+                                    for i in st.items))
+
+
 class QbitDialog(QDialog):
     def __init__(self, win):
         super().__init__(win)
@@ -155,7 +254,9 @@ class QbitDialog(QDialog):
         s = win.settings
         self.setWindowTitle(win.tr_("qbit_title"))
         lay = QVBoxLayout(self)
-        help_ = QLabel(win.tr_("qbit_help"))
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(12)
+        help_ = label(win.tr_("qbit_help"), "muted")
         help_.setWordWrap(True)
         lay.addWidget(help_)
         form = QFormLayout()
@@ -179,6 +280,9 @@ class QbitDialog(QDialog):
         test_row.addWidget(self.result, 1)
         lay.addLayout(test_row)
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText(win.tr_("save"))
+        btns.button(QDialogButtonBox.Ok).setObjectName("primary")
+        btns.button(QDialogButtonBox.Cancel).setText(win.tr_("cancel"))
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
@@ -209,7 +313,7 @@ class MainWindow(QWidget):
         if self.lang not in LANGS:
             self.lang = "en"
         self.setWindowIcon(QIcon(desktop.ICON))
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
 
         self.armed = None            # None, "downloads" or "timer"
         self.deadline = 0.0          # timer mode: time.time() to act at
@@ -221,116 +325,116 @@ class MainWindow(QWidget):
         self.inhibitor = SleepInhibitor()
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(10)
+
+        # header
         top = QHBoxLayout()
-        top.addWidget(QLabel("<h3>Sundown</h3>"))
-        top.addStretch()
-        self.lang_label = QLabel()
+        logo = QLabel()
+        logo.setPixmap(QIcon(desktop.ICON).pixmap(QSize(44, 44)))
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        titles.addWidget(label("Sundown", "title"))
+        self.subtitle = label("", "muted", wrap=True)
+        titles.addWidget(self.subtitle)
         self.lang_box = QComboBox()
         for code, name in LANGS.items():
             self.lang_box.addItem(name, code)
         self.lang_box.setCurrentIndex(list(LANGS).index(self.lang))
         self.lang_box.currentIndexChanged.connect(self.set_lang)
-        top.addWidget(self.lang_label)
-        top.addWidget(self.lang_box)
+        top.addWidget(logo)
+        top.addSpacing(6)
+        top.addLayout(titles, 1)
+        top.addSpacing(10)
+        top.addWidget(self.lang_box, 0, Qt.AlignTop)
         lay.addLayout(top)
+        lay.addSpacing(8)
 
+        # action
+        self.sec_action = label("", "section")
+        lay.addWidget(self.sec_action)
         act_row = QHBoxLayout()
-        self.action_label = QLabel()
-        self.action_box = QComboBox()
-        for a in power.ACTIONS:
-            self.action_box.addItem("", a)
+        act_row.setSpacing(10)
+        self.action_group = QButtonGroup(self)
+        self.action_btns = {}
+        for i, a in enumerate(power.ACTIONS):
+            b = QToolButton()
+            b.setObjectName("action")
+            b.setCheckable(True)
+            b.setIcon(QIcon(theme.asset(ACTION_ICONS[a])))
+            b.setIconSize(QSize(26, 26))
+            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.setCursor(Qt.PointingHandCursor)
+            self.action_group.addButton(b, i)
+            self.action_btns[a] = b
+            act_row.addWidget(b)
         a = self.settings.value("action", "poweroff")
-        self.action_box.setCurrentIndex(power.ACTIONS.index(a) if a in power.ACTIONS else 0)
-        act_row.addWidget(self.action_label)
-        act_row.addWidget(self.action_box, 1)
+        self.action_btns[a if a in power.ACTIONS else "poweroff"].setChecked(True)
+        self.action_group.idToggled.connect(lambda *_: self.update_ui())
         lay.addLayout(act_row)
+        lay.addSpacing(6)
 
-        self.when_box = QGroupBox()
-        g = QGridLayout(self.when_box)
+        # when: segmented tabs over a stacked card
+        self.sec_when = label("", "section")
+        lay.addWidget(self.sec_when)
+        segbar = card("segbar")
+        seg_lay = QHBoxLayout(segbar)
+        seg_lay.setContentsMargins(4, 4, 4, 4)
+        seg_lay.setSpacing(4)
         self.mode_group = QButtonGroup(self)
-        self.radios = {}
+        self.tabs = {}
         for i, m in enumerate(MODES):
-            self.radios[m] = QRadioButton()
-            self.mode_group.addButton(self.radios[m], i)
+            b = QPushButton()
+            b.setObjectName("seg")
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            self.mode_group.addButton(b, i)
+            self.tabs[m] = b
+            seg_lay.addWidget(b)
+        lay.addWidget(segbar)
 
-        # after downloads
-        g.addWidget(self.radios["downloads"], 0, 0, 1, 4)
-        self.steam_cb = QCheckBox()
-        self.steam_cb.setChecked(self.settings.value("watch_steam", True, type=bool))
-        self.steam_state = QLabel()
-        self.qbit_cb = QCheckBox()
-        self.qbit_cb.setChecked(self.settings.value("watch_qbit", True, type=bool))
-        self.qbit_state = QLabel()
-        for lbl in (self.steam_state, self.qbit_state):
-            # One line under its checkbox; a long text must not stretch the window.
-            lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            lbl.setContentsMargins(24, 0, 0, 4)
-        self.qbit_btn = QPushButton(QIcon.fromTheme("configure"), "")
-        self.qbit_btn.clicked.connect(self.edit_qbit)
-        g.addWidget(self.steam_cb, 1, 1, 1, 3)
-        g.addWidget(self.steam_state, 2, 1, 1, 3)
-        g.addWidget(self.qbit_cb, 3, 1, 1, 2)
-        g.addWidget(self.qbit_btn, 3, 3)
-        g.addWidget(self.qbit_state, 4, 1, 1, 3)
-        grace_row = QHBoxLayout()
-        self.grace_label = QLabel()
-        self.grace = QSpinBox()
-        self.grace.setRange(1, 120)
-        self.grace.setValue(self.settings.value("grace", 2, type=int))
-        grace_row.addWidget(self.grace_label)
-        grace_row.addWidget(self.grace)
-        grace_row.addStretch()
-        g.addLayout(grace_row, 5, 1, 1, 3)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.build_downloads_page())
+        self.pages.addWidget(self.build_in_page())
+        self.pages.addWidget(self.build_at_page())
+        self.pages.addWidget(self.build_now_page())
+        lay.addWidget(self.pages)
 
-        # in N minutes
-        g.addWidget(self.radios["in"], 6, 0, 1, 1)
-        self.in_spin = QSpinBox()
-        self.in_spin.setRange(1, 24 * 60)
-        self.in_spin.setValue(self.settings.value("in_minutes", 30, type=int))
-        in_row = QHBoxLayout()
-        in_row.addWidget(self.in_spin)
-        in_row.addStretch()
-        g.addLayout(in_row, 6, 1, 1, 3)
+        # hero: what is armed and how long is left
+        self.hero = card("hero")
+        hl = QVBoxLayout(self.hero)
+        hl.setContentsMargins(18, 14, 18, 14)
+        hl.setSpacing(2)
+        self.hero_top = label("", "section")
+        self.hero_big = label("", "big")
+        self.hero_note = label("", "muted", wrap=True)
+        for w in (self.hero_top, self.hero_big, self.hero_note):
+            w.setAlignment(Qt.AlignCenter)
+            hl.addWidget(w)
+        self.hero.hide()
+        lay.addWidget(self.hero)
 
-        # at HH:MM
-        g.addWidget(self.radios["at"], 7, 0, 1, 1)
-        self.at_edit = QTimeEdit()
-        self.at_edit.setDisplayFormat("HH:mm")
-        t = QTime.fromString(self.settings.value("at_time", "23:30"), "HH:mm")
-        self.at_edit.setTime(t if t.isValid() else QTime(23, 30))
-        at_row = QHBoxLayout()
-        at_row.addWidget(self.at_edit)
-        at_row.addStretch()
-        g.addLayout(at_row, 7, 1, 1, 3)
-
-        g.addWidget(self.radios["now"], 8, 0, 1, 4)
-        g.setColumnMinimumWidth(0, 24)
-        g.setColumnStretch(2, 1)
-        lay.addWidget(self.when_box)
+        lay.addStretch()
+        self.status = label("", "muted", wrap=True)
+        self.status.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self.status)
+        self.start_btn = QPushButton()
+        self.start_btn.setObjectName("primary")
+        self.start_btn.setCursor(Qt.PointingHandCursor)
+        self.start_btn.clicked.connect(self.toggle)
+        lay.addWidget(self.start_btn)
 
         mode = self.settings.value("mode", "downloads")
-        self.radios[mode if mode in MODES else "downloads"].setChecked(True)
+        self.tabs[mode if mode in MODES else "downloads"].setChecked(True)
+        self.pages.setCurrentIndex(self.mode_group.checkedId())
+        self.mode_group.idToggled.connect(self.mode_changed)
 
-        bottom = QHBoxLayout()
-        self.status = QLabel()
-        self.status.setWordWrap(True)
-        self.start_btn = QPushButton()
-        self.start_btn.clicked.connect(self.toggle)
-        bottom.addWidget(self.status, 1)
-        bottom.addWidget(self.start_btn)
-        lay.addLayout(bottom)
-        self.about = QLabel()
-        self.about.setEnabled(False)
-        self.about.setWordWrap(True)
-        lay.addWidget(self.about)
-
-        self.inputs = [self.action_box, self.steam_cb, self.qbit_cb, self.grace, self.in_spin,
-                       self.at_edit, *self.radios.values()]
-        for w in (self.steam_cb, self.qbit_cb):
+        self.inputs = [*self.action_btns.values(), *self.tabs.values(), self.steam.check,
+                       self.qbit.check, self.grace, self.in_spin, self.at_edit,
+                       *self.preset_btns]
+        for w in (self.steam.check, self.qbit.check):
             w.toggled.connect(self.sources_changed)
-        self.mode_group.idToggled.connect(lambda *_: self.update_ui())
-        self.in_spin.valueChanged.connect(lambda: self.radios["in"].setChecked(True))
-        self.at_edit.timeChanged.connect(lambda: self.radios["at"].setChecked(True))
 
         self.poller = Poller()
         self.apply_qbit_settings()
@@ -343,19 +447,112 @@ class MainWindow(QWidget):
         self.ticker.start(1000)
 
         self.retranslate()
+        self.start_btn.setFocus()
+
+    # ---------------------------------------------------------- pages
+    def build_downloads_page(self):
+        page = card()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(12)
+        self.steam = SourceRow()
+        self.steam.check.setText("Steam")
+        self.steam.check.setChecked(self.settings.value("watch_steam", True, type=bool))
+        self.qbit_btn = QPushButton(QIcon(theme.asset("sliders.svg")), "")
+        self.qbit_btn.setObjectName("preset")
+        self.qbit_btn.setCursor(Qt.PointingHandCursor)
+        self.qbit_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.qbit_btn.clicked.connect(self.edit_qbit)
+        self.qbit = SourceRow(self.qbit_btn)
+        self.qbit.check.setText("qBittorrent")
+        self.qbit.check.setChecked(self.settings.value("watch_qbit", True, type=bool))
+        v.addWidget(self.steam)
+        v.addWidget(divider())
+        v.addWidget(self.qbit)
+        v.addWidget(divider())
+        row = QHBoxLayout()
+        self.grace_label = label("", "muted")
+        self.grace = QSpinBox()
+        self.grace.setRange(1, 120)
+        self.grace.setValue(self.settings.value("grace", 2, type=int))
+        row.addWidget(self.grace_label, 1)
+        row.addWidget(self.grace)
+        v.addLayout(row)
+        return page
+
+    def build_in_page(self):
+        page = card()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(18, 18, 18, 18)
+        v.setSpacing(12)
+        self.in_label = label("", "section")
+        self.in_spin = QSpinBox()
+        self.in_spin.setObjectName("bigspin")
+        self.in_spin.setRange(1, 24 * 60)
+        self.in_spin.setValue(self.settings.value("in_minutes", 30, type=int))
+        self.in_spin.setAlignment(Qt.AlignCenter)
+        presets = QHBoxLayout()
+        presets.addStretch()
+        self.preset_btns = []
+        for n in PRESETS:
+            b = QPushButton()
+            b.setObjectName("preset")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, n=n: self.in_spin.setValue(n))
+            self.preset_btns.append(b)
+            presets.addWidget(b)
+        presets.addStretch()
+        v.addStretch()
+        v.addWidget(self.in_label, 0, Qt.AlignCenter)
+        v.addWidget(self.in_spin, 0, Qt.AlignCenter)
+        v.addLayout(presets)
+        v.addStretch()
+        return page
+
+    def build_at_page(self):
+        page = card()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(18, 18, 18, 18)
+        v.setSpacing(12)
+        self.at_label = label("", "section")
+        self.at_edit = QTimeEdit()
+        self.at_edit.setObjectName("bigspin")
+        self.at_edit.setDisplayFormat("HH:mm")
+        self.at_edit.setAlignment(Qt.AlignCenter)
+        t = QTime.fromString(self.settings.value("at_time", "23:30"), "HH:mm")
+        self.at_edit.setTime(t if t.isValid() else QTime(23, 30))
+        v.addStretch()
+        v.addWidget(self.at_label, 0, Qt.AlignCenter)
+        v.addWidget(self.at_edit, 0, Qt.AlignCenter)
+        v.addStretch()
+        return page
+
+    def build_now_page(self):
+        page = card()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(18, 22, 18, 22)
+        self.now_hint = label("", "muted", wrap=True)
+        self.now_hint.setAlignment(Qt.AlignCenter)
+        v.addWidget(self.now_hint)
+        return page
+
+    def mode_changed(self, i, checked):
+        if checked:
+            self.pages.setCurrentIndex(i)
+            self.update_ui()
 
     # ---------------------------------------------------------- helpers
     def tr_(self, key, **kw):
         return STRINGS[self.lang][key].format(**kw)
 
     def action(self):
-        return self.action_box.currentData()
+        return power.ACTIONS[self.action_group.checkedId()]
 
     def action_text(self):
         return self.tr_("act_" + self.action())
 
     def mode(self):
-        return MODES[self.mode_group.checkedId()]
+        return MODES[max(self.mode_group.checkedId(), 0)]
 
     def set_lang(self, i):
         self.lang = self.lang_box.itemData(i)
@@ -364,22 +561,20 @@ class MainWindow(QWidget):
 
     def retranslate(self):
         self.setWindowTitle("Sundown")
-        self.lang_label.setText(self.tr_("language"))
-        self.action_label.setText(self.tr_("action"))
-        for i, a in enumerate(power.ACTIONS):
-            self.action_box.setItemText(i, self.tr_("act_" + a))
-        self.when_box.setTitle(self.tr_("when"))
-        self.radios["downloads"].setText(self.tr_("mode_downloads"))
-        self.radios["in"].setText(self.tr_("mode_in"))
-        self.radios["at"].setText(self.tr_("mode_at"))
-        self.radios["now"].setText(self.tr_("mode_now"))
-        self.in_spin.setSuffix(" " + self.tr_("minutes"))
-        self.grace.setSuffix(" " + self.tr_("minutes"))
-        self.grace_label.setText(self.tr_("grace"))
-        self.steam_cb.setText(self.tr_("watch_steam"))
-        self.qbit_cb.setText(self.tr_("watch_qbit"))
+        self.subtitle.setText(self.tr_("subtitle"))
+        self.sec_action.setText(self.tr_("sec_action"))
+        self.sec_when.setText(self.tr_("sec_when"))
+        for a, b in self.action_btns.items():
+            b.setText(self.tr_("act_" + a))
+        for m, b in self.tabs.items():
+            b.setText(self.tr_("tab_" + m))
         self.qbit_btn.setText(self.tr_("qbit_settings"))
-        self.about.setText(f"<small>{self.tr_('about')}</small>")
+        self.grace_label.setText(self.tr_("grace"))
+        self.grace.setSuffix(" " + self.tr_("minutes"))
+        self.in_spin.setSuffix(" " + self.tr_("minutes"))
+        for n, b in zip(PRESETS, self.preset_btns):
+            b.setText(f"{n} {self.tr_('minutes')}")
+        self.now_hint.setText(self.tr_("now_hint"))
         if self.tray:
             self.build_tray_menu()
         self.show_sources(*self.last)
@@ -389,8 +584,8 @@ class MainWindow(QWidget):
         s = self.settings
         s.setValue("action", self.action())
         s.setValue("mode", self.mode())
-        s.setValue("watch_steam", self.steam_cb.isChecked())
-        s.setValue("watch_qbit", self.qbit_cb.isChecked())
+        s.setValue("watch_steam", self.steam.check.isChecked())
+        s.setValue("watch_qbit", self.qbit.check.isChecked())
         s.setValue("grace", self.grace.value())
         s.setValue("in_minutes", self.in_spin.value())
         s.setValue("at_time", self.at_edit.time().toString("HH:mm"))
@@ -409,44 +604,36 @@ class MainWindow(QWidget):
             self.apply_qbit_settings()
 
     def sources_changed(self):
-        self.poller.watch_steam = self.steam_cb.isChecked()
-        self.poller.watch_qbit = self.qbit_cb.isChecked()
+        self.poller.watch_steam = self.steam.check.isChecked()
+        self.poller.watch_qbit = self.qbit.check.isChecked()
         self.poller.kick()
+        steam, qbit = self.last
+        self.last = (steam if self.steam.check.isChecked() else None,
+                     qbit if self.qbit.check.isChecked() else None)
+        self.show_sources(*self.last)
         self.update_ui()
 
-    def describe(self, st):
-        if st is None:
-            return ""
-        if st.error:
-            return f"<span style='color:#d9534f'>{self.tr_(st.error)}</span>"
-        if not st.running:
-            return self.tr_("st_not_running")
-        if not st.active:
-            return self.tr_("st_idle")
+    def describe_items(self, st):
         parts = []
         for it in st.items[:2]:
             name = it.name if len(it.name) <= 28 else it.name[:27] + "…"
             name = html.escape(name)
-            parts.append(f"{name} {it.progress * 100:.0f}%" if it.progress >= 0 else name)
+            parts.append(f"{name} · {it.progress * 100:.0f}%" if it.progress >= 0 else name)
         if len(st.items) > 2:
             parts.append(self.tr_("st_more", n=len(st.items) - 2))
-        text = self.tr_("st_active", items=", ".join(parts))
+        text = ", ".join(parts)
         if st.speed:
             text += " · " + self.tr_("st_speed", speed=fmt_bytes(st.speed))
-        return f"<b>{text}</b>"
+        return text
 
     def show_sources(self, steam, qbit):
-        for lbl, st in ((self.steam_state, steam), (self.qbit_state, qbit)):
-            text = self.describe(st)
-            lbl.setText(text)
-            lbl.setToolTip("<br>".join(f"{html.escape(i.name)} {i.progress * 100:.0f}%" if i.progress >= 0
-                                       else html.escape(i.name) for i in st.items) if st else "")
-            lbl.setVisible(bool(text))
+        self.steam.show_status(self, steam)
+        self.qbit.show_status(self, qbit)
 
     def on_poll(self, steam, qbit):
         # A poll that started before a checkbox changed may carry a stale source.
-        steam = steam if self.steam_cb.isChecked() else None
-        qbit = qbit if self.qbit_cb.isChecked() else None
+        steam = steam if self.steam.check.isChecked() else None
+        qbit = qbit if self.qbit.check.isChecked() else None
         self.last = (steam, qbit)
         self.show_sources(steam, qbit)
         if self.armed != "downloads":
@@ -554,25 +741,54 @@ class MainWindow(QWidget):
                 return self.tr_("armed_downloads", action=act)
             left = self.grace.value() * 60 - (time.time() - self.idle_since)
             return self.tr_("armed_quiet", action=act, left=fmt_left(left))
-        if self.mode() == "downloads" and not (self.steam_cb.isChecked()
-                                               or self.qbit_cb.isChecked()):
+        if self.mode() == "downloads" and not (self.steam.check.isChecked()
+                                               or self.qbit.check.isChecked()):
             return self.tr_("no_source")
         return self.tr_("idle_state")
+
+    def watched_names(self):
+        return ", ".join(n for n, cb in (("Steam", self.steam.check), ("qBittorrent", self.qbit.check))
+                         if cb.isChecked())
 
     def update_ui(self):
         busy = bool(self.armed or self.countdown)
         for w in self.inputs:
             w.setEnabled(not busy)
-        self.qbit_btn.setEnabled(True)
-        no_source = self.mode() == "downloads" and not (self.steam_cb.isChecked()
-                                                        or self.qbit_cb.isChecked())
+        no_source = self.mode() == "downloads" and not self.watched_names()
+        self.start_btn.setObjectName("danger" if busy else "primary")
         self.start_btn.setText(self.tr_("cancel") if busy else self.tr_("start"))
-        self.start_btn.setIcon(QIcon.fromTheme("dialog-cancel" if busy else "system-shutdown"))
         self.start_btn.setEnabled(busy or not no_source)
-        text = self.status_text()
-        self.status.setText(f"<b>{text}</b>" if busy else text)
+        self.start_btn.style().unpolish(self.start_btn)
+        self.start_btn.style().polish(self.start_btn)
+        act = self.action_text()
+        self.in_label.setText(self.tr_("in_label", action=act).upper())
+        self.at_label.setText(self.tr_("at_label", action=act).upper())
+
+        self.hero.setVisible(bool(self.armed))
+        if self.armed == "timer":
+            self.hero_top.setText(self.tr_("in_label", action=act).upper())
+            self.hero_big.setObjectName("big")
+            self.hero_big.setText(fmt_left(self.deadline - time.time()))
+            self.hero_note.setText(self.tr_("at_note", time=time.strftime(
+                "%H:%M", time.localtime(self.deadline))))
+        elif self.armed == "downloads" and self.idle_since is None:
+            self.hero_top.setText(act.upper())
+            self.hero_big.setObjectName("bigaction")
+            self.hero_big.setText(self.tr_("hero_wait"))
+            self.hero_note.setText(self.tr_("watching", names=self.watched_names()))
+        elif self.armed == "downloads":
+            left = self.grace.value() * 60 - (time.time() - self.idle_since)
+            self.hero_top.setText(self.tr_("in_label", action=act).upper())
+            self.hero_big.setObjectName("big")
+            self.hero_big.setText(fmt_left(left))
+            self.hero_note.setText(self.tr_("quiet_note"))
+        self.hero_big.style().unpolish(self.hero_big)
+        self.hero_big.style().polish(self.hero_big)
+
+        self.status.setText(self.tr_("no_source") if no_source and not busy else "")
+        self.status.setVisible(no_source and not busy)
         if self.tray:
-            self.tray.setToolTip("Sundown\n" + text)
+            self.tray.setToolTip("Sundown\n" + self.status_text())
 
     # ---------------------------------------------------------- tray
     def ensure_tray(self):
@@ -634,11 +850,12 @@ def main():
     app.setApplicationName("sundown")
     app.setDesktopFileName("sundown")
     app.setQuitOnLastWindowClosed(False)    # the tray keeps it alive while armed
+    theme.apply(app)
     # A bundled Qt (AppImage) does not know the Plasma icon theme on its own.
     if not QIcon.themeName() or QIcon.themeName() == "hicolor":
-        for theme in ("breeze", "breeze-dark", "Adwaita"):
-            if os.path.isdir(f"/usr/share/icons/{theme}"):
-                QIcon.setThemeName(theme)
+        for name in ("breeze-dark", "breeze", "Adwaita"):
+            if os.path.isdir(f"/usr/share/icons/{name}"):
+                QIcon.setThemeName(name)
                 break
     desktop.install_menu_entry()
     w = MainWindow()

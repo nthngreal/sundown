@@ -16,7 +16,7 @@ Comment[uk]=Вимкнення комп'ютера за таймером або 
 Comment[ru]=Выключение компьютера по таймеру или после загрузок
 Exec="{exe}"
 Icon=sundown
-Categories=Utility;System;
+Categories=Utility;
 Keywords=shutdown;poweroff;timer;steam;qbittorrent;torrent;download;
 Terminal=false
 """
