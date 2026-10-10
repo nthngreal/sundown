@@ -212,14 +212,54 @@ class QbitClient:
                     continue
                 if e.code in (401, 403):
                     raise QbitError("err_qbit_login") from e
-                raise QbitError("err_qbit_connect", str(e)) from e
+                # Something answers, but not qBittorrent's API (e.g. Steam's CEF
+                # debugger, which also likes port 8080).
+                raise QbitError("err_qbit_other", str(e)) from e
             except (urllib.error.URLError, OSError) as e:
                 raise QbitError("err_qbit_connect", str(e)) from e
             except ValueError as e:
-                raise QbitError("err_qbit_connect", "bad response") from e
+                raise QbitError("err_qbit_other", "not a qBittorrent response") from e
 
     def torrents(self):
         return self.get_json("/api/v2/torrents/info")
+
+
+QBIT_CONFIGS = [
+    "~/.config/qBittorrent/qBittorrent.conf",
+    "~/.var/app/org.qbittorrent.qBittorrent/config/qBittorrent/qBittorrent.conf",
+]
+LOCAL_URL = re.compile(r"^(https?)://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/?$", re.I)
+
+
+def qbit_config_url(paths=None):
+    """Web UI address from qBittorrent's own settings, or None."""
+    for path in paths if paths is not None else QBIT_CONFIGS:
+        prefs, section = {}, ""
+        try:
+            with open(os.path.expanduser(path), encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("["):
+                        section = line
+                    elif section == "[Preferences]" and "=" in line:
+                        k, v = line.split("=", 1)
+                        prefs[k.strip()] = v.strip()
+        except OSError:
+            continue
+        port = prefs.get("WebUI\\Port", "8080")
+        if not port.isdigit():
+            continue
+        scheme = "https" if prefs.get("WebUI\\HTTPS\\Enabled") == "true" else "http"
+        return f"{scheme}://localhost:{port}"
+    return None
+
+
+def effective_qbit_url(url, paths=None):
+    """A local address follows the port set in qBittorrent, so changing the port
+    there needs no change here. A remote address is used as typed."""
+    if LOCAL_URL.match(url or ""):
+        return qbit_config_url(paths) or url
+    return url
 
 
 class QbitWatcher:

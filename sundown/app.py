@@ -67,13 +67,23 @@ class Poller(QThread):
     def __init__(self):
         super().__init__()
         self.steam = watchers.SteamWatcher()
+        self.qbit_url = "http://localhost:8080"
         self.qbit = watchers.QbitWatcher(watchers.QbitClient())
         self.watch_steam = self.watch_qbit = True
         self._stop = self._kick = False
 
     def configure_qbit(self, url, user, password, stalled):
-        self.qbit = watchers.QbitWatcher(watchers.QbitClient(url, user, password), stalled)
+        self.qbit_url = url
+        self.qbit = watchers.QbitWatcher(
+            watchers.QbitClient(watchers.effective_qbit_url(url), user, password), stalled)
         self.kick()
+
+    def follow_qbit_port(self):
+        """Pick up a Web UI port changed in qBittorrent while Sundown runs."""
+        url = watchers.effective_qbit_url(self.qbit_url)
+        c = self.qbit.client
+        if url.rstrip("/") != c.url:
+            self.qbit.client = watchers.QbitClient(url, c.username, c.password)
 
     def kick(self):
         self._kick = True
@@ -86,6 +96,8 @@ class Poller(QThread):
         while not self._stop:
             self._kick = False
             s = self.steam.poll() if self.watch_steam else None
+            if self.watch_qbit:
+                self.follow_qbit_port()
             q = self.qbit.poll() if self.watch_qbit else None
             if self._stop:
                 break
@@ -264,7 +276,7 @@ class QbitDialog(QDialog):
         help_.setWordWrap(True)
         lay.addWidget(help_)
         form = QFormLayout()
-        self.url = QLineEdit(s.value("qbit_url", "http://localhost:8080"))
+        self.url = QLineEdit(watchers.effective_qbit_url(s.value("qbit_url", "http://localhost:8080")))
         self.user = QLineEdit(s.value("qbit_user", ""))
         self.password = QLineEdit(s.value("qbit_pass", ""))
         self.password.setEchoMode(QLineEdit.Password)
@@ -293,7 +305,8 @@ class QbitDialog(QDialog):
         self.setMinimumWidth(440)
 
     def test(self):
-        client = watchers.QbitClient(self.url.text().strip(), self.user.text(),
+        client = watchers.QbitClient(watchers.effective_qbit_url(self.url.text().strip()),
+                                     self.user.text(),
                                      self.password.text(), timeout=3)
         try:
             n = len(client.torrents())

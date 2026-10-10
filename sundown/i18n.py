@@ -4,6 +4,7 @@ LANGS = {"en": "English", "uk": "Українська", "ru": "Русский"}
 
 STRINGS = {
     "en": {
+        "err_qbit_other": "Another program answers at this address, not qBittorrent. Change the Web UI port.",
         "save": "Save",
         "subtitle": "Turns the computer off after downloads or on a timer.",
         "sec_action": "ACTION",
@@ -78,6 +79,7 @@ STRINGS = {
         "about": "Turns the computer off on a timer or after Steam and qBittorrent downloads.",
     },
     "uk": {
+        "err_qbit_other": "За цією адресою відповідає інша програма, не qBittorrent. Змініть порт Web UI.",
         "save": "Зберегти",
         "subtitle": "Вимикає комп'ютер після завантажень або за таймером.",
         "sec_action": "ДІЯ",
@@ -153,6 +155,7 @@ STRINGS = {
         "about": "Вимикає комп'ютер за таймером або після завантажень у Steam і qBittorrent.",
     },
     "ru": {
+        "err_qbit_other": "По этому адресу отвечает другая программа, не qBittorrent. Смените порт Web UI.",
         "save": "Сохранить",
         "subtitle": "Выключает компьютер после загрузок или по таймеру.",
         "sec_action": "ДЕЙСТВИЕ",

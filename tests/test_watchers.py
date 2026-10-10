@@ -138,6 +138,27 @@ class QbitTest(unittest.TestCase):
         st = watchers.QbitWatcher(watchers.QbitClient(self.url, "admin", "nope")).poll()
         self.assertEqual(st.error, "err_qbit_login")
 
+    def test_not_qbittorrent(self):
+        st = watchers.QbitWatcher(watchers.QbitClient(self.url + "/nothing")).poll()
+        self.assertEqual(st.error, "err_qbit_other")
+
+    def test_config_port(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = os.path.join(d, "qBittorrent.conf")
+            with open(conf, "w") as f:
+                f.write("[LegalNotice]\nAccepted=true\n\n[Preferences]\n"
+                        "WebUI\\Enabled=true\nWebUI\\Port=8090\n")
+            self.assertEqual(watchers.qbit_config_url([conf]), "http://localhost:8090")
+            self.assertEqual(watchers.effective_qbit_url("http://localhost:8080", [conf]),
+                             "http://localhost:8090")
+            self.assertEqual(watchers.effective_qbit_url("http://127.0.0.1:8080/", [conf]),
+                             "http://localhost:8090")
+            self.assertEqual(watchers.effective_qbit_url("http://nas:8080", [conf]),
+                             "http://nas:8080")
+            self.assertEqual(watchers.effective_qbit_url("http://localhost:8080",
+                                                         [conf + ".missing"]),
+                             "http://localhost:8080")
+
     def test_unreachable(self):
         client = watchers.QbitClient("http://127.0.0.1:1", timeout=1)
         with mock.patch.object(watchers, "process_running", return_value=False):
