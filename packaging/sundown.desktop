@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Sundown
+Comment=Turn the computer off on a timer or after downloads
+Exec=sundown
+Icon=sundown
+Categories=Utility;System;
+Terminal=false
