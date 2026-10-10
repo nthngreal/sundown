@@ -29,6 +29,7 @@ class Status:
     speed: int = 0                    # total bytes/s, 0 when unknown
     error: str = ""                   # i18n key; the source could not be read
     detail: str = ""
+    args: dict = field(default_factory=dict)   # values for the error text
 
 
 def process_running(*names):
@@ -129,15 +130,9 @@ def steam_downloads(library_dirs):
             if not flags & STEAM_ACTIVE or flags & STEAM_UPDATE_PAUSED:
                 continue
             name = st.get("name") or f"App {st.get('appid', '?')}"
-            progress = -1.0
-            try:
-                total = int(st.get("BytesToDownload", "0"))
-                done = int(st.get("BytesDownloaded", "0"))
-                if total > 0:
-                    progress = min(done / total, 1.0)
-            except ValueError:
-                pass
-            items.append(Item(name, progress))
+            # No percentage: Steam rewrites BytesDownloaded in the manifest only now and
+            # then, so it lags far behind its own window (22% shown at 54%).
+            items.append(Item(name))
     return items
 
 
@@ -165,9 +160,9 @@ QBIT_STALLED = {"stalledDL"}
 
 
 class QbitError(Exception):
-    def __init__(self, key, detail=""):
+    def __init__(self, key, detail="", **args):
         super().__init__(f"{key}: {detail}" if detail else key)
-        self.key, self.detail = key, detail
+        self.key, self.detail, self.args_ = key, detail, args
 
 
 class QbitClient:
@@ -196,7 +191,7 @@ class QbitClient:
         except urllib.error.HTTPError as e:
             if e.code == 403:
                 raise QbitError("err_qbit_banned") from e
-            raise QbitError("err_qbit_connect", str(e)) from e
+            raise QbitError("err_qbit_other", str(e)) from e
         except (urllib.error.URLError, OSError) as e:
             raise QbitError("err_qbit_connect", str(e)) from e
         if text.strip() != "Ok.":
@@ -231,8 +226,8 @@ QBIT_CONFIGS = [
 LOCAL_URL = re.compile(r"^(https?)://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/?$", re.I)
 
 
-def qbit_config_url(paths=None):
-    """Web UI address from qBittorrent's own settings, or None."""
+def qbit_config(paths=None):
+    """Web UI settings from qBittorrent's own config: {enabled, port, https}, or None."""
     for path in paths if paths is not None else QBIT_CONFIGS:
         prefs, section = {}, ""
         try:
@@ -249,9 +244,88 @@ def qbit_config_url(paths=None):
         port = prefs.get("WebUI\\Port", "8080")
         if not port.isdigit():
             continue
-        scheme = "https" if prefs.get("WebUI\\HTTPS\\Enabled") == "true" else "http"
-        return f"{scheme}://localhost:{port}"
+        return {"enabled": prefs.get("WebUI\\Enabled") == "true", "port": int(port),
+                "https": prefs.get("WebUI\\HTTPS\\Enabled") == "true"}
     return None
+
+
+def qbit_config_url(paths=None):
+    """Web UI address from qBittorrent's own settings, or None."""
+    cfg = qbit_config(paths)
+    if not cfg:
+        return None
+    return f"{'https' if cfg['https'] else 'http'}://localhost:{cfg['port']}"
+
+
+def _listening_inodes(port):
+    inodes = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table) as f:
+                next(f)
+                for line in f:
+                    cols = line.split()
+                    # local address is HEXIP:HEXPORT, state 0A is LISTEN
+                    if int(cols[1].rsplit(":", 1)[1], 16) == port and cols[3] == "0A":
+                        inodes.add(cols[9])
+        except (OSError, ValueError, IndexError, StopIteration):
+            pass
+    return inodes
+
+
+# Friendlier names for programs that often sit on qBittorrent's default port.
+PROGRAM_NAMES = {"steamwebhelper": "Steam", "steam": "Steam", "java": "Java",
+                 "node": "Node.js", "docker-proxy": "Docker"}
+
+
+def port_owner(port):
+    """Name of the process listening on this TCP port, if it is ours to see."""
+    inodes = _listening_inodes(port)
+    if not inodes:
+        return None
+    targets = {f"socket:[{i}]" for i in inodes}
+    for fd_dir in glob.glob("/proc/[0-9]*/fd"):
+        try:
+            for fd in os.listdir(fd_dir):
+                if os.readlink(os.path.join(fd_dir, fd)) in targets:
+                    with open(os.path.join(os.path.dirname(fd_dir), "comm")) as f:
+                        return f.read().strip()
+        except OSError:
+            continue
+    return "?"       # someone listens, but runs as another user
+
+
+def free_port(start=8090):
+    """First port from start up that nothing listens on."""
+    for port in range(start, start + 100):
+        if not _listening_inodes(port):
+            return port
+    return start
+
+
+def diagnose(err, url, paths=None):
+    """Turn a raw connection error into the most likely cause and its fix."""
+    try:
+        port = urllib.parse.urlsplit(url).port or (443 if url.startswith("https") else 80)
+    except ValueError:
+        return err
+    if not LOCAL_URL.match(url or "") or err.key not in ("err_qbit_connect", "err_qbit_other"):
+        return err
+    cfg = qbit_config(paths)
+    if cfg and not cfg["enabled"]:
+        return QbitError("err_qbit_off", err.detail)
+    if port < 1024:
+        return QbitError("err_qbit_lowport", err.detail, port=port, free=free_port())
+    if err.key == "err_qbit_other":
+        owner = port_owner(port)
+        if owner and owner != "?" and not owner.startswith("qbittorrent"):
+            return QbitError("err_qbit_taken", err.detail, port=port,
+                             prog=PROGRAM_NAMES.get(owner, owner),
+                             free=free_port())
+        return QbitError("err_qbit_other_port", err.detail, port=port, free=free_port())
+    if cfg:   # Web UI is on in the settings, yet nothing answers: not applied yet
+        return QbitError("err_qbit_restart", err.detail, port=port)
+    return err
 
 
 def effective_qbit_url(url, paths=None):
@@ -274,7 +348,8 @@ class QbitWatcher:
             if e.key == "err_qbit_connect" and not process_running("qbittorrent",
                                                                      "qbittorrent-nox"):
                 return Status(running=False)
-            return Status(running=True, error=e.key, detail=e.detail)
+            e = diagnose(e, self.client.url)
+            return Status(running=True, error=e.key, detail=e.detail, args=e.args_)
         wanted = QBIT_ACTIVE | (QBIT_STALLED if self.wait_stalled else set())
         items, speed = [], 0
         for t in torrents:

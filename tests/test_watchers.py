@@ -53,8 +53,7 @@ class SteamTest(unittest.TestCase):
         self.acf(self.main, 5, "Updating", 1030)
         items = watchers.steam_downloads(watchers.steam_library_dirs(self.roots))
         self.assertEqual(sorted(i.name for i in items), ["Downloading", "Updating"])
-        dl = next(i for i in items if i.name == "Downloading")
-        self.assertAlmostEqual(dl.progress, 0.25)
+        self.assertTrue(all(i.progress < 0 for i in items))   # manifest bytes lag
 
     def test_watcher(self):
         self.acf(self.extra, 3, "Downloading", 1026)
@@ -159,12 +158,58 @@ class QbitTest(unittest.TestCase):
                                                          [conf + ".missing"]),
                              "http://localhost:8080")
 
+    def test_port_owner(self):
+        import socket
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen()
+        port = srv.getsockname()[1]
+        with open("/proc/self/comm") as f:
+            me = f.read().strip()
+        self.assertEqual(watchers.port_owner(port), me)
+        self.assertNotEqual(watchers.free_port(port), port)
+        srv.close()
+        self.assertIsNone(watchers.port_owner(port))
+
+    def test_diagnose(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = os.path.join(d, "qBittorrent.conf")
+
+            def cfg(enabled, port):
+                with open(conf, "w") as f:
+                    f.write("[Preferences]\nWebUI\\Enabled=%s\nWebUI\\Port=%d\n"
+                            % ("true" if enabled else "false", port))
+
+            refused = watchers.QbitError("err_qbit_connect", "refused")
+            other = watchers.QbitError("err_qbit_other", "HTTP Error 404")
+            cfg(False, 8080)
+            self.assertEqual(watchers.diagnose(refused, "http://localhost:8080", [conf]).key,
+                             "err_qbit_off")
+            cfg(True, 90)
+            e = watchers.diagnose(refused, "http://localhost:90", [conf])
+            self.assertEqual((e.key, e.args_["port"]), ("err_qbit_lowport", 90))
+            cfg(True, 8090)
+            e = watchers.diagnose(refused, "http://localhost:8090", [conf])
+            self.assertEqual((e.key, e.args_["port"]), ("err_qbit_restart", 8090))
+            with mock.patch.object(watchers, "port_owner", return_value="steamwebhelper"):
+                e = watchers.diagnose(other, "http://localhost:8080", [conf])
+                self.assertEqual((e.key, e.args_["prog"]), ("err_qbit_taken", "Steam"))
+            with mock.patch.object(watchers, "port_owner", return_value="?"):
+                self.assertEqual(watchers.diagnose(other, "http://localhost:8080", [conf]).key,
+                                 "err_qbit_other_port")
+            self.assertEqual(watchers.diagnose(other, "http://nas:8080", [conf]).key,
+                             "err_qbit_other")
+        self.assertEqual(watchers.diagnose(refused, "http://localhost:8080", []).key,
+                         "err_qbit_connect")
+
     def test_unreachable(self):
-        client = watchers.QbitClient("http://127.0.0.1:1", timeout=1)
+        client = watchers.QbitClient(f"http://127.0.0.1:{watchers.free_port(59000)}",
+                                     timeout=1)
         with mock.patch.object(watchers, "process_running", return_value=False):
             st = watchers.QbitWatcher(client).poll()
             self.assertFalse(st.running or st.error)
-        with mock.patch.object(watchers, "process_running", return_value=True):
+        with mock.patch.object(watchers, "process_running", return_value=True), \
+                mock.patch.object(watchers, "QBIT_CONFIGS", []):
             self.assertEqual(watchers.QbitWatcher(client).poll().error, "err_qbit_connect")
 
 

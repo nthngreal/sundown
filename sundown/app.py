@@ -26,6 +26,11 @@ ACTION_ICONS = {"poweroff": "power.svg", "reboot": "restart.svg", "suspend": "mo
 PRESETS = (15, 30, 60, 120)
 
 
+class _Args(dict):
+    def __missing__(self, key):     # a text never breaks over a missing value
+        return "?"
+
+
 def label(text="", name=None, wrap=False):
     lbl = QLabel(text)
     if name:
@@ -204,8 +209,8 @@ class SourceRow(QWidget):
         self.check = QCheckBox()
         self.check.setObjectName("source")
         self.chip = label()
-        self.detail = label("", "detail")
-        # One line; a long text must not stretch the window.
+        self.detail = label("", "detail", wrap=True)
+        # A long text wraps instead of stretching the window.
         self.detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.detail.setContentsMargins(30, 0, 0, 0)
         self.bar = QProgressBar()
@@ -237,7 +242,7 @@ class SourceRow(QWidget):
             self.setToolTip("")
             return
         if st.error:
-            chip, color, detail = "chip_err", theme.ERR, win.tr_(st.error)
+            chip, color, detail = "chip_err", theme.ERR, win.tr_(st.error, **st.args)
         elif not st.running:
             chip, color, detail = "chip_off", theme.MUTED, ""
         elif not st.active:
@@ -314,7 +319,8 @@ class QbitDialog(QDialog):
         except watchers.QbitError as e:
             # The raw reason (e.g. "Connection refused") tells a closed Web UI from a
             # wrong port or address.
-            text = self.win.tr_(e.key)
+            e = watchers.diagnose(e, client.url)
+            text = self.win.tr_(e.key, **e.args_)
             if e.detail:
                 text += f"<br><small>{html.escape(e.detail)}</small>"
             self.result.setText(text)
@@ -565,7 +571,7 @@ class MainWindow(QWidget):
 
     # ---------------------------------------------------------- helpers
     def tr_(self, key, **kw):
-        return STRINGS[self.lang][key].format(**kw)
+        return STRINGS[self.lang][key].format_map(_Args(kw))
 
     def action(self):
         return power.ACTIONS[self.action_group.checkedId()]

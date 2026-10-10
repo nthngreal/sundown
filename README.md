@@ -20,7 +20,7 @@ the new place and the menu entry follows.
 
 - **Action:** shut down, restart or sleep.
 - **When downloads finish:** watches Steam and qBittorrent and shows what is downloading
-  right now. When nothing has downloaded for a few minutes (2 by default, so Steam can
+  right now (with progress for torrents). When nothing has downloaded for a few minutes (2 by default, so Steam can
   move on to the next game in its queue), it acts.
 - **In N minutes**, **at a time** (e.g. 23:30), or **now**.
 - A **60-second countdown with Cancel** always comes first, so nothing turns off by surprise.
@@ -37,6 +37,11 @@ Sundown reads qBittorrent through its Web UI:
    (Or type the Web UI username and password in Sundown → *Web UI settings…*.)
 3. Press *Test* in Sundown's *Web UI settings…* to check.
 
+If something is wrong, Sundown says what and how to fix it: the Web UI is off, its port
+is taken by another program (Steam often sits on 8080, the default; then use 8090), the
+port is below 1024, or qBittorrent has not applied the setting yet (quit it from the tray
+and start it again). Sundown follows the port set in qBittorrent by itself.
+
 Paused torrents never count. Torrents with no peers (*stalled*) do not count either,
 because a dead torrent would keep the computer on forever; tick *Also wait for stalled
 torrents* if you want them to.
@@ -46,7 +51,8 @@ torrents* if you want them to.
 - **Steam:** reads the `appmanifest_*.acf` files in every Steam library
   (`libraryfolders.vdf`, native and Flatpak Steam). An app whose state says update
   running / downloading / staging / validating counts as downloading; queued updates that
-  are not running and paused downloads do not.
+  are not running and paused downloads do not. Steam updates the byte counters in these
+  files only now and then, so Sundown shows no percentage for Steam.
 - **qBittorrent:** asks the Web UI API (`/api/v2/torrents/info`) for torrents in the
   downloading, queued, metadata, checking and moving states.
 - If a watched source cannot be read (for example the qBittorrent Web UI is off while

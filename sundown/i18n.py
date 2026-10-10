@@ -4,6 +4,11 @@ LANGS = {"en": "English", "uk": "Українська", "ru": "Русский"}
 
 STRINGS = {
     "en": {
+        "err_qbit_off": "The Web UI is off in qBittorrent. Turn it on: Tools → Options → Web UI.",
+        "err_qbit_lowport": "Port {port} is below 1024, and Linux does not let qBittorrent open it. Set the Web UI port in qBittorrent to {free}.",
+        "err_qbit_taken": "Port {port} is taken by {prog}, so qBittorrent cannot use it. Set the Web UI port in qBittorrent to {free}.",
+        "err_qbit_other_port": "Port {port} is used by another program, not qBittorrent. Set the Web UI port in qBittorrent to {free}.",
+        "err_qbit_restart": "qBittorrent has not started the Web UI on port {port} yet. Quit it fully (tray icon → Exit) and start it again.",
         "err_qbit_other": "Another program answers at this address, not qBittorrent. Change the Web UI port.",
         "save": "Save",
         "subtitle": "Turns the computer off after downloads or on a timer.",
@@ -79,6 +84,11 @@ STRINGS = {
         "about": "Turns the computer off on a timer or after Steam and qBittorrent downloads.",
     },
     "uk": {
+        "err_qbit_off": "У qBittorrent вимкнено Web UI. Увімкніть: Інструменти → Налаштування → Веб-інтерфейс.",
+        "err_qbit_lowport": "Порт {port} менший за 1024, і Linux не дає qBittorrent його відкрити. Поставте в qBittorrent порт Web UI {free}.",
+        "err_qbit_taken": "Порт {port} зайнятий програмою {prog}, тому qBittorrent не може його використати. Поставте в qBittorrent порт Web UI {free}.",
+        "err_qbit_other_port": "Порт {port} зайнятий іншою програмою, не qBittorrent. Поставте в qBittorrent порт Web UI {free}.",
+        "err_qbit_restart": "qBittorrent ще не запустив Web UI на порту {port}. Повністю вийдіть із нього (трей → Вийти) і запустіть знову.",
         "err_qbit_other": "За цією адресою відповідає інша програма, не qBittorrent. Змініть порт Web UI.",
         "save": "Зберегти",
         "subtitle": "Вимикає комп'ютер після завантажень або за таймером.",
@@ -155,6 +165,11 @@ STRINGS = {
         "about": "Вимикає комп'ютер за таймером або після завантажень у Steam і qBittorrent.",
     },
     "ru": {
+        "err_qbit_off": "В qBittorrent выключен Web UI. Включите: Инструменты → Настройки → Веб-интерфейс.",
+        "err_qbit_lowport": "Порт {port} меньше 1024, и Linux не даёт qBittorrent его открыть. Поставьте в qBittorrent порт Web UI {free}.",
+        "err_qbit_taken": "Порт {port} занят программой {prog}, поэтому qBittorrent не может его использовать. Поставьте в qBittorrent порт Web UI {free}.",
+        "err_qbit_other_port": "Порт {port} занят другой программой, не qBittorrent. Поставьте в qBittorrent порт Web UI {free}.",
+        "err_qbit_restart": "qBittorrent ещё не запустил Web UI на порту {port}. Полностью выйдите из него (трей → Выход) и запустите снова.",
         "err_qbit_other": "По этому адресу отвечает другая программа, не qBittorrent. Смените порт Web UI.",
         "save": "Сохранить",
         "subtitle": "Выключает компьютер после загрузок или по таймеру.",
