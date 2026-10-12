@@ -7,7 +7,6 @@ import sys
 import time
 
 from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTime, QTimer, Signal
-from PySide6.QtDBus import QDBusConnection, QDBusInterface
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFormLayout, QFrame, QGridLayout,
@@ -111,37 +110,6 @@ class Poller(QThread):
                 if self._stop or self._kick:
                     break
                 self.msleep(100)
-
-
-class SleepInhibitor:
-    """Keeps Plasma from suspending the computer while Sundown waits."""
-
-    def __init__(self):
-        self.cookie = None
-
-    def _iface(self):
-        return QDBusInterface("org.freedesktop.PowerManagement.Inhibit",
-                              "/org/freedesktop/PowerManagement/Inhibit",
-                              "org.freedesktop.PowerManagement.Inhibit",
-                              QDBusConnection.sessionBus())
-
-    def inhibit(self, reason):
-        if self.cookie is not None:
-            return
-        iface = self._iface()
-        if iface.isValid():
-            reply = iface.call("Inhibit", "Sundown", reason)
-            args = reply.arguments()
-            if args:
-                self.cookie = args[0]
-
-    def release(self):
-        if self.cookie is None:
-            return
-        iface = self._iface()
-        if iface.isValid():
-            iface.call("UnInhibit", self.cookie)
-        self.cookie = None
 
 
 class Countdown(QDialog):
@@ -350,7 +318,7 @@ class MainWindow(QWidget):
         self.tray = None
         self.tray_told = False
         self.last = (None, None)
-        self.inhibitor = SleepInhibitor()
+        self.inhibitor = power.KeepAwake()
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(22, 20, 22, 18)
@@ -873,7 +841,50 @@ class MainWindow(QWidget):
         self.quit_app()
 
 
+def selftest(out_path):
+    """--selftest OUT.json: build the window off screen, read Steam and qBittorrent once,
+    write what was found and exit. Used by CI on the installed build."""
+    import json
+    import traceback
+    from dataclasses import asdict
+    result = {"platform": sys.platform, "frozen": bool(getattr(sys, "frozen", False))}
+    try:
+        result["icon_ok"] = not QIcon(desktop.ICON).isNull()
+        result["assets_ok"] = all(os.path.exists(theme.asset(n)) for n in
+                                  ("check.svg", "chevron-down.svg", *ACTION_ICONS.values()))
+        result["steam_roots"] = watchers.STEAM_ROOTS
+        result["steam"] = asdict(watchers.SteamWatcher().poll())
+        url = watchers.effective_qbit_url("http://localhost:8080")
+        result["qbit_url"] = url
+        result["qbit"] = asdict(watchers.QbitWatcher(watchers.QbitClient(url, timeout=2)).poll())
+        w = MainWindow()
+        w.poller.stop()
+        for lang in range(len(LANGS)):
+            w.lang_box.setCurrentIndex(lang)
+        w.inhibitor.inhibit("selftest")
+        w.inhibitor.release()
+        result["ok"] = result["icon_ok"] and result["assets_ok"]
+    except Exception:
+        result["ok"] = False
+        result["error"] = traceback.format_exc()
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+    return 0 if result["ok"] else 1
+
+
 def main():
+    test_out = None
+    if "--selftest" in sys.argv:
+        i = sys.argv.index("--selftest")
+        test_out = sys.argv[i + 1] if i + 1 < len(sys.argv) else "sundown-selftest.json"
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    if sys.platform == "win32":
+        # Own taskbar group and icon instead of python's.
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("nthngreal.Sundown")
+        # The installer looks for this to ask the user to close Sundown first.
+        main.mutex = ctypes.windll.kernel32.CreateMutexW(None, False,
+                                                         "SundownSingleInstanceMutex")
     app = QApplication(sys.argv)
     app.setApplicationName("sundown")
     app.setDesktopFileName("sundown")
@@ -885,6 +896,8 @@ def main():
             if os.path.isdir(f"/usr/share/icons/{name}"):
                 QIcon.setThemeName(name)
                 break
+    if test_out:
+        return selftest(test_out)
     desktop.install_menu_entry()
     w = MainWindow()
     w.show()

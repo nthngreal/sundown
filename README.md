@@ -1,11 +1,28 @@
 # Sundown
 
 **Turn the computer off when your Steam and qBittorrent downloads finish, or on a timer.**
-For KDE Plasma 6 and other systemd desktops. No terminal, no sudo.
+For Linux (KDE Plasma 6 and other systemd desktops) and Windows 10/11. No terminal, no
+admin rights.
 
 ![Sundown](docs/screenshot.png)
 
 ## Install
+
+### Windows
+
+1. Download **Sundown-Setup-X.Y.Z.exe** from the [Releases](../../releases/latest) page.
+2. Run it. It installs for your account only (no admin prompt) and adds Sundown to the
+   Start menu. Windows SmartScreen may warn about an unknown publisher, because the
+   installer is not code-signed: press *More info → Run anyway*.
+3. Pick what to do and when, then press **Start**.
+
+Uninstall from *Settings → Apps*. Your settings (language, chosen action, qBittorrent
+address) stay in the registry under `HKCU\Software\sundown`, so a reinstall remembers them.
+
+On Windows, *Shut down* and *Restart* close open programs without asking, like on Linux,
+so one app with an unsaved document cannot keep the computer on all night.
+
+### Linux
 
 1. Download **Sundown-x86_64.AppImage** from the [Releases](../../releases/latest) page.
 2. Double-click it. If Plasma asks whether to make it executable, say yes.
@@ -59,9 +76,13 @@ torrents* if you want them to.
   qBittorrent runs), Sundown keeps waiting and shows the error, rather than turning the
   computer off too early. A program that is not running counts as finished.
 - **Power:** `systemctl poweroff | reboot | suspend` through systemd-logind, which allows
-  the user of the active local session to do this without sudo.
+  the user of the active local session to do this without sudo. On Windows:
+  `shutdown /s` or `/r` (with `/f`), and `SetSuspendState` for sleep.
 - **Staying awake:** `org.freedesktop.PowerManagement.Inhibit` on the session bus
-  (Plasma's power management), released before the action runs.
+  (Plasma's power management), or `SetThreadExecutionState` on Windows, released before
+  the action runs.
+- **Windows paths:** Steam from the registry (`SteamPath`), qBittorrent settings from
+  `%APPDATA%\qBittorrent\qBittorrent.ini`.
 
 The qBittorrent password, if you use one, is stored in plain text in
 `~/.config/sundown/sundown.conf`. Using the localhost bypass avoids storing it.
@@ -79,6 +100,11 @@ python3 sundown.py                    # run
 python3 -m unittest discover tests    # tests
 bash packaging/build-appimage.sh      # build dist/Sundown-x86_64.AppImage (needs appimagetool)
 ```
+
+On Windows the installer is built with PyInstaller and Inno Setup 6
+(`packaging/sundown.iss`); `packaging/verify-windows.ps1` installs it, runs a self-test
+from the installed copy, uninstalls, reinstalls and checks a forced failure. CI runs all of
+this on a clean Windows runner before attaching the installer to a release.
 
 `SUNDOWN_DRY_RUN=1 python3 sundown.py` prints the action instead of running it.
 

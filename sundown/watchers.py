@@ -8,10 +8,13 @@ import http.cookiejar
 import json
 import os
 import re
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+
+WINDOWS = sys.platform == "win32"
 
 
 @dataclass
@@ -32,8 +35,21 @@ class Status:
     args: dict = field(default_factory=dict)   # values for the error text
 
 
+def _exe_name(name):
+    """steam.exe -> steam, so Linux and Windows process names compare alike."""
+    name = (name or "").lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
 def process_running(*names):
     """True when a process with one of these names (comm) runs for any user."""
+    if WINDOWS:
+        import psutil
+        wanted = {_exe_name(n) for n in names}
+        for p in psutil.process_iter(["name"]):
+            if _exe_name(p.info.get("name")) in wanted:
+                return True
+        return False
     for comm in glob.glob("/proc/[0-9]*/comm"):
         try:
             with open(comm) as f:
@@ -53,7 +69,26 @@ STEAM_UPDATE_PAUSED = 512
 STEAM_ACTIVE = (STEAM_UPDATE_RUNNING | 1024 | 131072 | 262144 | 524288 | 1048576
                 | 2097152 | 4194304)
 
-STEAM_ROOTS = [
+def _windows_steam_roots():
+    roots = []
+    try:
+        import winreg
+        for hive, key, value in ((winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+                                 (winreg.HKEY_LOCAL_MACHINE,
+                                  r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath")):
+            try:
+                with winreg.OpenKey(hive, key) as k:
+                    roots.append(winreg.QueryValueEx(k, value)[0])
+            except OSError:
+                pass
+    except ImportError:
+        pass
+    pf86 = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
+    roots.append(os.path.join(pf86, "Steam"))
+    return roots
+
+
+STEAM_ROOTS = _windows_steam_roots() if WINDOWS else [
     "~/.local/share/Steam",
     "~/.steam/steam",
     "~/.steam/root",
@@ -112,7 +147,7 @@ def steam_library_dirs(roots=None):
         folders = lib.get("libraryfolders") or lib.get("LibraryFolders") or {}
         for v in folders.values():
             path = v.get("path") if isinstance(v, dict) else v
-            if isinstance(path, str) and path.startswith("/"):
+            if isinstance(path, str) and os.path.isabs(path):
                 add(os.path.join(path, "steamapps"))
     return out
 
@@ -220,6 +255,8 @@ class QbitClient:
 
 
 QBIT_CONFIGS = [
+    os.path.join(os.environ.get("APPDATA", "~"), "qBittorrent", "qBittorrent.ini"),
+] if WINDOWS else [
     "~/.config/qBittorrent/qBittorrent.conf",
     "~/.var/app/org.qbittorrent.qBittorrent/config/qBittorrent/qBittorrent.conf",
 ]
@@ -257,7 +294,20 @@ def qbit_config_url(paths=None):
     return f"{'https' if cfg['https'] else 'http'}://localhost:{cfg['port']}"
 
 
+def _windows_listeners(port):
+    """{pid} of processes listening on this TCP port (Windows)."""
+    import psutil
+    try:
+        conns = psutil.net_connections(kind="tcp")
+    except (psutil.Error, OSError):
+        return set()
+    return {c.pid or 0 for c in conns
+            if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port}
+
+
 def _listening_inodes(port):
+    if WINDOWS:
+        return _windows_listeners(port)
     inodes = set()
     for table in ("/proc/net/tcp", "/proc/net/tcp6"):
         try:
@@ -283,6 +333,14 @@ def port_owner(port):
     inodes = _listening_inodes(port)
     if not inodes:
         return None
+    if WINDOWS:
+        import psutil
+        for pid in inodes:
+            try:
+                return _exe_name(psutil.Process(pid).name())
+            except (psutil.Error, ValueError):
+                continue
+        return "?"
     targets = {f"socket:[{i}]" for i in inodes}
     for fd_dir in glob.glob("/proc/[0-9]*/fd"):
         try:
@@ -314,7 +372,7 @@ def diagnose(err, url, paths=None):
     cfg = qbit_config(paths)
     if cfg and not cfg["enabled"]:
         return QbitError("err_qbit_off", err.detail)
-    if port < 1024:
+    if port < 1024 and not WINDOWS:     # only Linux keeps low ports for root
         return QbitError("err_qbit_lowport", err.detail, port=port, free=free_port())
     if err.key == "err_qbit_other":
         owner = port_owner(port)

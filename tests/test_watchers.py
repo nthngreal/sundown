@@ -158,6 +158,7 @@ class QbitTest(unittest.TestCase):
                                                          [conf + ".missing"]),
                              "http://localhost:8080")
 
+    @unittest.skipIf(watchers.WINDOWS, "reads /proc")
     def test_port_owner(self):
         import socket
         srv = socket.socket()
@@ -185,9 +186,10 @@ class QbitTest(unittest.TestCase):
             cfg(False, 8080)
             self.assertEqual(watchers.diagnose(refused, "http://localhost:8080", [conf]).key,
                              "err_qbit_off")
-            cfg(True, 90)
-            e = watchers.diagnose(refused, "http://localhost:90", [conf])
-            self.assertEqual((e.key, e.args_["port"]), ("err_qbit_lowport", 90))
+            if not watchers.WINDOWS:     # low ports are fine for users on Windows
+                cfg(True, 90)
+                e = watchers.diagnose(refused, "http://localhost:90", [conf])
+                self.assertEqual((e.key, e.args_["port"]), ("err_qbit_lowport", 90))
             cfg(True, 8090)
             e = watchers.diagnose(refused, "http://localhost:8090", [conf])
             self.assertEqual((e.key, e.args_["port"]), ("err_qbit_restart", 8090))
