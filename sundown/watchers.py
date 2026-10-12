@@ -200,6 +200,11 @@ class QbitError(Exception):
         self.key, self.detail, self.args_ = key, detail, args
 
 
+# (url, username, password) -> error key, for logins qBittorrent refused. Shared by
+# every client, so a new client for the same settings does not try again.
+_FAILED_LOGINS = {}
+
+
 class QbitClient:
     """qBittorrent Web UI API v2 client (Tools → Preferences → Web UI)."""
 
@@ -232,15 +237,49 @@ class QbitClient:
         if text.strip() != "Ok.":
             raise QbitError("err_qbit_login")
 
+    def _key(self):
+        return (self.url, self.username, self.password)
+
+    def forget_failures(self):
+        """The user asked to try these credentials again (the Test button)."""
+        _FAILED_LOGINS.pop(self._key(), None)
+
+    def _login_once(self):
+        """Log in, but never twice with credentials that already failed: qBittorrent
+        bans the address after a few failed logins (5 by default), and polling every
+        few seconds would get there in under a minute."""
+        failed = _FAILED_LOGINS.get(self._key())
+        if failed == "err_qbit_login":
+            raise QbitError(failed)
+        # A ban that was there is gone (qBittorrent restarted), so one more try.
+        _FAILED_LOGINS.pop(self._key(), None)
+        if not self.username and not self.password:
+            # Nothing to log in with: the localhost bypass is off.
+            raise QbitError("err_qbit_auth")
+        try:
+            self.login()
+        except QbitError as e:
+            if e.key in ("err_qbit_login", "err_qbit_banned"):
+                _FAILED_LOGINS[self._key()] = e.key
+            raise
+
     def get_json(self, path):
         for attempt in (0, 1):
             try:
                 return json.loads(self._request(path))
             except urllib.error.HTTPError as e:
-                if e.code in (401, 403) and attempt == 0:
-                    self.login()       # no session yet, or it expired
-                    continue
                 if e.code in (401, 403):
+                    try:
+                        body = e.read().decode("utf-8", "replace").lower()
+                    except OSError:
+                        body = ""
+                    # A plain "not logged in" has an empty body (or just the status
+                    # text); a ban comes with a sentence, in qBittorrent's language.
+                    if body.strip() not in ("", "forbidden", "unauthorized"):
+                        raise QbitError("err_qbit_banned") from e
+                    if attempt == 0:
+                        self._login_once()     # no session yet, or it expired
+                        continue
                     raise QbitError("err_qbit_login") from e
                 # Something answers, but not qBittorrent's API (e.g. Steam's CEF
                 # debugger, which also likes port 8080).
@@ -263,12 +302,27 @@ QBIT_CONFIGS = [
 LOCAL_URL = re.compile(r"^(https?)://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/?$", re.I)
 
 
+def _portable_qbit_configs():
+    """A portable qBittorrent keeps its settings in a profile folder next to the exe."""
+    if not WINDOWS:
+        return []
+    import psutil
+    found = []
+    for p in psutil.process_iter(["name", "exe"]):
+        if _exe_name(p.info.get("name")) == "qbittorrent" and p.info.get("exe"):
+            found.append(os.path.join(os.path.dirname(p.info["exe"]), "profile",
+                                      "qBittorrent", "config", "qBittorrent.ini"))
+    return found
+
+
 def qbit_config(paths=None):
     """Web UI settings from qBittorrent's own config: {enabled, port, https}, or None."""
-    for path in paths if paths is not None else QBIT_CONFIGS:
+    if paths is None:
+        paths = _portable_qbit_configs() + QBIT_CONFIGS
+    for path in paths:
         prefs, section = {}, ""
         try:
-            with open(os.path.expanduser(path), encoding="utf-8", errors="replace") as f:
+            with open(os.path.expanduser(path), encoding="utf-8-sig", errors="replace") as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith("["):

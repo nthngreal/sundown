@@ -2,12 +2,13 @@
 downloads finish, in N minutes, at a time, or now. A 60 s countdown with Cancel always
 comes first."""
 import html
+import math
 import os
 import sys
 import time
 
 from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTime, QTimer, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QTextDocument
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFormLayout, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
@@ -180,7 +181,11 @@ class SourceRow(QWidget):
         self.detail = label("", "detail", wrap=True)
         # A long text wraps instead of stretching the window.
         self.detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.detail.setContentsMargins(30, 0, 0, 0)
+        # Indent through a layout, not label margins: QLabel's heightForWidth leaves
+        # its margins out, and a long text would get one line too few.
+        detail_box = QHBoxLayout()
+        detail_box.setContentsMargins(30, 0, 0, 0)
+        detail_box.addWidget(self.detail)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setTextVisible(False)
@@ -192,7 +197,7 @@ class SourceRow(QWidget):
         if extra:
             g.addWidget(extra, 0, 2)
         g.addWidget(self.chip, 0, 3)
-        g.addWidget(self.detail, 1, 0, 1, 4)
+        g.addLayout(detail_box, 1, 0, 1, 4)
         g.addLayout(bar_box, 2, 0, 1, 4)
         # Keep the rows' space when hidden, so the window does not jump as downloads
         # start and stop.
@@ -201,6 +206,23 @@ class SourceRow(QWidget):
             pol.setRetainSizeWhenHidden(True)
             w.setSizePolicy(pol)
             w.hide()
+
+    def _fit_detail(self):
+        # A wrapped label does not ask the window for more height by itself, so a
+        # long error would be cut off; reserve the height its text needs.
+        # QLabel.heightForWidth undercounts rich text by the document margins, so
+        # measure the text the way the label lays it out.
+        w = self.detail.width()
+        if w > 50 and self.detail.text():
+            doc = QTextDocument()
+            doc.setDefaultFont(self.detail.font())
+            doc.setHtml(self.detail.text())
+            doc.setTextWidth(w)
+            self.detail.setMinimumHeight(math.ceil(doc.size().height()))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit_detail()
 
     def show_status(self, win, st):
         if st is None:
@@ -223,6 +245,7 @@ class SourceRow(QWidget):
         self.detail.setText(f"<span style='color:{theme.ERR}'>{detail}</span>"
                             if st.error else detail)
         self.detail.setVisible(bool(detail))
+        self._fit_detail()
         first = st.items[0] if st.active and st.items else None
         self.bar.setVisible(bool(first and first.progress >= 0))
         if first and first.progress >= 0:
@@ -281,6 +304,7 @@ class QbitDialog(QDialog):
         client = watchers.QbitClient(watchers.effective_qbit_url(self.url.text().strip()),
                                      self.user.text(),
                                      self.password.text(), timeout=3)
+        client.forget_failures()
         try:
             n = len(client.torrents())
             self.result.setText(self.win.tr_("qbit_ok", n=n))

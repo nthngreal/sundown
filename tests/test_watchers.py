@@ -71,6 +71,8 @@ class SteamTest(unittest.TestCase):
 class FakeQbit(BaseHTTPRequestHandler):
     torrents = []
     need_login = True
+    logins = failures = 0      # like qBittorrent: 5 failed logins ban the address
+    BAN = "Ваша IP-адреса заблокована після забагатьох невдалих спроб автентифікації."
 
     def log_message(self, *a):
         pass
@@ -85,16 +87,22 @@ class FakeQbit(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(n).decode()
-        if self.path == "/api/v2/auth/login":
+        if FakeQbit.failures >= 5:
+            self._send(403, self.BAN)
+        elif self.path == "/api/v2/auth/login":
+            FakeQbit.logins += 1
             if "username=admin" in body and "password=secret" in body:
                 self._send(200, "Ok.", "SID=abc; HttpOnly; path=/")
             else:
+                FakeQbit.failures += 1
                 self._send(200, "Fails.")
         else:
             self._send(404, "")
 
     def do_GET(self):
-        if self.path.startswith("/api/v2/torrents/info"):
+        if FakeQbit.failures >= 5:
+            self._send(403, self.BAN)
+        elif self.path.startswith("/api/v2/torrents/info"):
             if self.need_login and "SID=abc" not in (self.headers.get("Cookie") or ""):
                 self._send(403, "Forbidden")
             else:
@@ -133,9 +141,50 @@ class QbitTest(unittest.TestCase):
         FakeQbit.torrents = [{"name": "c", "state": "stalledUP", "progress": 1}]
         self.assertFalse(w.poll().active)
 
+    def setUp(self):
+        FakeQbit.logins = FakeQbit.failures = 0
+        watchers._FAILED_LOGINS.clear()
+
     def test_bad_password(self):
         st = watchers.QbitWatcher(watchers.QbitClient(self.url, "admin", "nope")).poll()
         self.assertEqual(st.error, "err_qbit_login")
+
+    def test_no_ban_from_polling(self):
+        # Wrong password: one login, then no more however often Sundown polls, also
+        # with a fresh client for the same settings (a port change rebuilds it).
+        for _ in range(10):
+            st = watchers.QbitWatcher(watchers.QbitClient(self.url, "admin", "nope")).poll()
+            self.assertEqual(st.error, "err_qbit_login")
+        self.assertEqual(FakeQbit.logins, 1)
+        # No credentials and no localhost bypass: no login at all.
+        for _ in range(10):
+            st = watchers.QbitWatcher(watchers.QbitClient(self.url)).poll()
+            self.assertEqual(st.error, "err_qbit_auth")
+        self.assertEqual(FakeQbit.logins, 1)
+        # The Test button tries once more on purpose; new credentials work at once.
+        c = watchers.QbitClient(self.url, "admin", "nope")
+        c.forget_failures()
+        self.assertRaises(watchers.QbitError, c.torrents)
+        self.assertEqual(FakeQbit.logins, 2)
+        st = watchers.QbitWatcher(watchers.QbitClient(self.url, "admin", "secret")).poll()
+        self.assertEqual(st.error, "")
+
+    def test_banned(self):
+        FakeQbit.failures = 5
+        for user in ("", "admin"):
+            st = watchers.QbitWatcher(watchers.QbitClient(self.url, user, "secret")).poll()
+            self.assertEqual(st.error, "err_qbit_banned")
+        self.assertEqual(FakeQbit.logins, 0)
+        FakeQbit.failures = 0      # qBittorrent restarted
+        st = watchers.QbitWatcher(watchers.QbitClient(self.url, "admin", "secret")).poll()
+        self.assertEqual(st.error, "")
+
+    def test_config_with_bom(self):
+        path = os.path.join(tempfile.mkdtemp(), "qBittorrent.ini")
+        with open(path, "w", encoding="utf-8-sig") as f:
+            f.write("[Preferences]\nWebUI\\Enabled=true\nWebUI\\Port=8080\n")
+        self.assertEqual(watchers.qbit_config([path]),
+                         {"enabled": True, "port": 8080, "https": False})
 
     def test_not_qbittorrent(self):
         st = watchers.QbitWatcher(watchers.QbitClient(self.url + "/nothing")).poll()
