@@ -1,4 +1,4 @@
-"""Download watchers for Steam and qBittorrent. No GUI imports here.
+"""Download watchers for Steam, qBittorrent and other game launchers. No GUI imports here.
 
 Each watcher's poll() returns a Status: whether something is downloading right now,
 a short list of what, and an error key when the source cannot be read.
@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -183,6 +184,119 @@ class SteamWatcher:
             return Status(running=True, error="err_steam_dir")
         items = steam_downloads(libs)
         return Status(running=True, active=bool(items), items=items)
+
+
+# ------------------------------------------------------------ launchers ----
+# Battle.net, Epic and the rest have no download API and no files that say what is
+# downloading. What they all do while downloading is write the game to disk, so a
+# launcher counts as downloading while its own processes move more than
+# LAUNCHER_BUSY bytes per second (disk, plus network where Windows counts it). The
+# "nothing for N minutes" wait smooths over short pauses between files.
+LAUNCHER_BUSY = 512 * 1024
+
+
+@dataclass(frozen=True)
+class Launcher:
+    key: str
+    name: str
+    procs: tuple          # process names without .exe
+    folders: tuple = ()   # install folders, under Program Files or absolute
+    path_hint: str = ""   # for generic process names: a folder in the exe's path
+
+
+LAUNCHERS = (
+    # Battle.net downloads through its update agent, which keeps running when the
+    # launcher window is closed.
+    Launcher("battlenet", "Battle.net", ("battle.net", "agent"), ("Battle.net",), "battle.net"),
+    Launcher("epic", "Epic Games", ("epicgameslauncher",), ("Epic Games\\Launcher",)),
+    Launcher("ea", "EA app", ("eadesktop", "eabackgroundservice"),
+             ("Electronic Arts\\EA Desktop",)),
+    Launcher("ubisoft", "Ubisoft Connect", ("upc", "ubisoftconnect", "uplayservice"),
+             ("Ubisoft\\Ubisoft Game Launcher",)),
+    Launcher("gog", "GOG Galaxy", ("galaxyclient", "galaxyclientservice"), ("GOG Galaxy",)),
+    Launcher("riot", "Riot Client", ("riotclientservices",), ("C:\\Riot Games\\Riot Client",)),
+    Launcher("rockstar", "Rockstar Games", ("launcher", "rockstarservice"),
+             ("Rockstar Games\\Launcher",), "rockstar games"),
+)
+
+
+def _program_dirs():
+    return [d for d in {os.environ.get(v) for v in
+                        ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")} if d]
+
+
+def installed_launchers():
+    """Keys of the launchers installed in their default folders (Windows)."""
+    if not WINDOWS:
+        return []
+    found = []
+    for la in LAUNCHERS:
+        for f in la.folders:
+            dirs = [f] if re.match(r"^[A-Za-z]:\\", f) else [
+                os.path.join(d, f) for d in _program_dirs()]
+            if any(os.path.isdir(d) for d in dirs):
+                found.append(la.key)
+                break
+    return found
+
+
+def launcher_processes():
+    """(pid, name, exe path, bytes moved so far or None) for every launcher process."""
+    if not WINDOWS:
+        return []
+    import psutil
+    wanted = {p for la in LAUNCHERS for p in la.procs}
+    out = []
+    for p in psutil.process_iter(["name"]):
+        name = _exe_name(p.info.get("name"))
+        if name not in wanted:
+            continue
+        try:
+            exe = p.exe() or ""
+        except (psutil.Error, OSError):
+            exe = ""
+        try:
+            c = p.io_counters()
+            moved = c.read_bytes + c.write_bytes
+        except (psutil.Error, OSError, AttributeError):
+            moved = None
+        out.append((p.pid, name, exe, moved))
+    return out
+
+
+class LauncherWatcher:
+    def __init__(self, sample=launcher_processes, clock=time.monotonic):
+        self.sample, self.clock = sample, clock
+        self.prev = {}        # pid -> (time, bytes moved)
+
+    def poll(self, keys):
+        """{key: Status} for the launchers in keys."""
+        now, seen, out = self.clock(), {}, {}
+        procs = self.sample() if keys else []
+        for la in LAUNCHERS:
+            if la.key not in keys:
+                continue
+            running, readable, rate = False, False, 0.0
+            for pid, name, exe, moved in procs:
+                if name not in la.procs:
+                    continue
+                if la.path_hint and la.path_hint not in exe.lower():
+                    continue
+                running = True
+                if moved is None:
+                    continue
+                readable = True
+                seen[pid] = (now, moved)
+                before = self.prev.get(pid)
+                if before and now > before[0] and moved >= before[1]:
+                    rate += (moved - before[1]) / (now - before[0])
+            if running and not readable:
+                # Cannot tell; like any unreadable source this keeps Sundown waiting.
+                out[la.key] = Status(running=True, error="err_launcher_io")
+            else:
+                out[la.key] = Status(running=running, active=running and rate >= LAUNCHER_BUSY)
+        self.prev = seen
+        return out
 
 
 # -------------------------------------------------------- qBittorrent ----

@@ -1,5 +1,5 @@
-"""Window: pick an action (shut down, restart, sleep) and when: after Steam/qBittorrent
-downloads finish, in N minutes, at a time, or now. A 60 s countdown with Cancel always
+"""Window: pick an action (shut down, restart, sleep) and when: after Steam, qBittorrent
+or game launcher downloads finish, in N minutes, at a time, or now. A 60 s countdown with Cancel always
 comes first."""
 import html
 import math
@@ -24,6 +24,8 @@ COUNTDOWN_SEC = int(os.environ.get("SUNDOWN_COUNTDOWN", "60"))
 MODES = ("downloads", "in", "at", "now")
 ACTION_ICONS = {"poweroff": "power.svg", "reboot": "restart.svg", "suspend": "moon.svg"}
 PRESETS = (15, 30, 60, 120)
+# Game launchers are watched on Windows only (on Linux they run under Wine).
+SHOW_LAUNCHERS = watchers.WINDOWS or os.environ.get("SUNDOWN_LAUNCHERS") == "1"
 
 
 class _Args(dict):
@@ -67,14 +69,17 @@ def fmt_bytes(n):
 
 class Poller(QThread):
     """Reads Steam and qBittorrent every few seconds off the GUI thread."""
-    result = Signal(object, object)    # steam Status or None, qbit Status or None
+    # steam Status or None, qbit Status or None, {launcher key: Status}
+    result = Signal(object, object, object)
 
     def __init__(self):
         super().__init__()
         self.steam = watchers.SteamWatcher()
         self.qbit_url = "http://localhost:8080"
         self.qbit = watchers.QbitWatcher(watchers.QbitClient())
+        self.launchers = watchers.LauncherWatcher()
         self.watch_steam = self.watch_qbit = True
+        self.watch_launchers = set()
         self._stop = self._kick = False
 
     def configure_qbit(self, url, user, password, stalled):
@@ -104,9 +109,10 @@ class Poller(QThread):
             if self.watch_qbit:
                 self.follow_qbit_port()
             q = self.qbit.poll() if self.watch_qbit else None
+            la = self.launchers.poll(set(self.watch_launchers))
             if self._stop:
                 break
-            self.result.emit(s, q)
+            self.result.emit(s, q, la)
             for _ in range(POLL_SEC * 10):
                 if self._stop or self._kick:
                     break
@@ -170,7 +176,7 @@ class Countdown(QDialog):
 class SourceRow(QWidget):
     """One watched program: checkbox, state chip, what is downloading, progress."""
 
-    def __init__(self, extra=None):
+    def __init__(self, extra=None, compact=False):
         super().__init__()
         g = QGridLayout(self)
         g.setContentsMargins(0, 0, 0, 0)
@@ -202,9 +208,10 @@ class SourceRow(QWidget):
         # Keep the rows' space when hidden, so the window does not jump as downloads
         # start and stop.
         for w in (self.detail, self.bar):
-            pol = w.sizePolicy()
-            pol.setRetainSizeWhenHidden(True)
-            w.setSizePolicy(pol)
+            if not compact:      # a launcher row has no details: keep it one line
+                pol = w.sizePolicy()
+                pol.setRetainSizeWhenHidden(True)
+                w.setSizePolicy(pol)
             w.hide()
 
     def _fit_detail(self):
@@ -257,6 +264,44 @@ class SourceRow(QWidget):
         self.setToolTip("<br>".join(f"{html.escape(i.name)} {i.progress * 100:.0f}%"
                                     if i.progress >= 0 else html.escape(i.name)
                                     for i in st.items))
+
+
+class LaunchersDialog(QDialog):
+    """Pick which game launchers appear on the Downloads page."""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.setWindowTitle(win.tr_("launchers_title"))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(10)
+        help_ = label(win.tr_("launchers_help"), "muted", wrap=True)
+        lay.addWidget(help_)
+        chosen = win.chosen_launchers()
+        installed = watchers.installed_launchers()
+        self.boxes = {}
+        for la in watchers.LAUNCHERS:
+            row = QHBoxLayout()
+            cb = QCheckBox(la.name)
+            cb.setChecked(la.key in chosen)
+            self.boxes[la.key] = cb
+            row.addWidget(cb)
+            row.addStretch()
+            if la.key in installed:
+                row.addWidget(label(win.tr_("installed"), "small"))
+            lay.addLayout(row)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText(win.tr_("save"))
+        btns.button(QDialogButtonBox.Ok).setObjectName("primary")
+        btns.button(QDialogButtonBox.Cancel).setText(win.tr_("cancel"))
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addSpacing(6)
+        lay.addWidget(btns)
+        self.setMinimumWidth(400)
+
+    def chosen(self):
+        return [k for k, cb in self.boxes.items() if cb.isChecked()]
 
 
 class QbitDialog(QDialog):
@@ -341,7 +386,7 @@ class MainWindow(QWidget):
         self.countdown = None
         self.tray = None
         self.tray_told = False
-        self.last = (None, None)
+        self.last = {}               # source key -> latest Status
         self.inhibitor = power.KeepAwake()
 
         lay = QVBoxLayout(self)
@@ -452,8 +497,11 @@ class MainWindow(QWidget):
 
         self.inputs = [*self.action_btns.values(), *self.tabs.values(), self.steam.check,
                        self.qbit.check, self.grace, self.in_spin, self.at_edit,
-                       *self.preset_btns]
-        for w in (self.steam.check, self.qbit.check):
+                       *self.preset_btns, *(r.check for r in self.launcher_rows.values())]
+        if SHOW_LAUNCHERS:
+            self.inputs.append(self.launchers_btn)
+        for w in (self.steam.check, self.qbit.check,
+                  *(r.check for r in self.launcher_rows.values())):
             w.toggled.connect(self.sources_changed)
 
         self.poller = Poller()
@@ -490,6 +538,24 @@ class MainWindow(QWidget):
         v.addWidget(divider())
         v.addWidget(self.qbit)
         v.addWidget(divider())
+        self.launcher_rows = {}
+        if SHOW_LAUNCHERS:
+            for la in watchers.LAUNCHERS:
+                r = SourceRow(compact=True)
+                r.check.setText(la.name)
+                r.check.setChecked(self.settings.value("watch_" + la.key, True, type=bool))
+                self.launcher_rows[la.key] = r
+                v.addWidget(r)
+            self.launchers_btn = QPushButton(QIcon(theme.asset("sliders.svg")), "")
+            self.launchers_btn.setObjectName("preset")
+            self.launchers_btn.setCursor(Qt.PointingHandCursor)
+            self.launchers_btn.clicked.connect(self.edit_launchers)
+            btn_row = QHBoxLayout()
+            btn_row.addWidget(self.launchers_btn)
+            btn_row.addStretch()
+            v.addLayout(btn_row)
+            v.addWidget(divider())
+            self.show_launcher_rows()
         row = QHBoxLayout()
         self.grace_label = label("", "muted")
         self.grace = QSpinBox()
@@ -589,6 +655,8 @@ class MainWindow(QWidget):
         for m, b in self.tabs.items():
             b.setText(self.tr_("tab_" + m))
         self.qbit_btn.setText(self.tr_("qbit_settings"))
+        if SHOW_LAUNCHERS:
+            self.launchers_btn.setText(self.tr_("launchers_btn"))
         self.grace_label.setText(self.tr_("grace"))
         self.grace.setSuffix(" " + self.tr_("minutes"))
         self.in_spin.setSuffix(" " + self.tr_("minutes"))
@@ -597,7 +665,7 @@ class MainWindow(QWidget):
         self.now_hint.setText(self.tr_("now_hint"))
         if self.tray:
             self.build_tray_menu()
-        self.show_sources(*self.last)
+        self.show_sources()
         self.update_ui()
 
     def save_settings(self):
@@ -606,6 +674,8 @@ class MainWindow(QWidget):
         s.setValue("mode", self.mode())
         s.setValue("watch_steam", self.steam.check.isChecked())
         s.setValue("watch_qbit", self.qbit.check.isChecked())
+        for key, row in self.launcher_rows.items():
+            s.setValue("watch_" + key, row.check.isChecked())
         s.setValue("grace", self.grace.value())
         s.setValue("in_minutes", self.in_spin.value())
         s.setValue("at_time", self.at_edit.time().toString("HH:mm"))
@@ -623,14 +693,50 @@ class MainWindow(QWidget):
             dlg.save()
             self.apply_qbit_settings()
 
+    def chosen_launchers(self):
+        """Launchers shown on the Downloads page: picked by the user, or at first the
+        installed ones."""
+        s = self.settings
+        if s.contains("launchers"):
+            keys = str(s.value("launchers", "")).split(",")
+        else:
+            keys = watchers.installed_launchers()
+        return [la.key for la in watchers.LAUNCHERS if la.key in keys]
+
+    def show_launcher_rows(self):
+        chosen = self.chosen_launchers()
+        for key, r in self.launcher_rows.items():
+            r.setVisible(key in chosen)
+
+    def edit_launchers(self):
+        dlg = LaunchersDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            self.settings.setValue("launchers", ",".join(dlg.chosen()))
+            self.show_launcher_rows()
+            self.sources_changed()
+            QTimer.singleShot(0, lambda: self.fit_height(shrink=True))
+
+    def watched(self):
+        """{source key: name} of the sources being watched."""
+        out = {}
+        if self.steam.check.isChecked():
+            out["steam"] = "Steam"
+        if self.qbit.check.isChecked():
+            out["qbit"] = "qBittorrent"
+        chosen = self.chosen_launchers() if self.launcher_rows else []
+        for la in watchers.LAUNCHERS:
+            if la.key in chosen and self.launcher_rows[la.key].check.isChecked():
+                out[la.key] = la.name
+        return out
+
     def sources_changed(self):
-        self.poller.watch_steam = self.steam.check.isChecked()
-        self.poller.watch_qbit = self.qbit.check.isChecked()
+        watched = self.watched()
+        self.poller.watch_steam = "steam" in watched
+        self.poller.watch_qbit = "qbit" in watched
+        self.poller.watch_launchers = {k for k in watched if k not in ("steam", "qbit")}
         self.poller.kick()
-        steam, qbit = self.last
-        self.last = (steam if self.steam.check.isChecked() else None,
-                     qbit if self.qbit.check.isChecked() else None)
-        self.show_sources(*self.last)
+        self.last = {k: st for k, st in self.last.items() if k in watched}
+        self.show_sources()
         self.update_ui()
 
     def describe_items(self, st):
@@ -646,20 +752,32 @@ class MainWindow(QWidget):
             text += " · " + self.tr_("st_speed", speed=fmt_bytes(st.speed))
         return text
 
-    def show_sources(self, steam, qbit):
-        self.steam.show_status(self, steam)
-        self.qbit.show_status(self, qbit)
+    def show_sources(self):
+        self.steam.show_status(self, self.last.get("steam"))
+        self.qbit.show_status(self, self.last.get("qbit"))
+        for key, r in self.launcher_rows.items():
+            r.show_status(self, self.last.get(key))
+        QTimer.singleShot(0, self.fit_height)
 
-    def on_poll(self, steam, qbit):
+    def fit_height(self, shrink=False):
+        # Qt's minimum window size leaves wrapped text out, so a window at its minimum
+        # squeezes rows; ask for the height the content needs at this width.
+        h = self.heightForWidth(self.width())
+        if h > 0:
+            self.setMinimumHeight(h)
+            if shrink and self.height() > h:
+                self.resize(self.width(), h)
+
+    def on_poll(self, steam, qbit, launchers):
         # A poll that started before a checkbox changed may carry a stale source.
-        steam = steam if self.steam.check.isChecked() else None
-        qbit = qbit if self.qbit.check.isChecked() else None
-        self.last = (steam, qbit)
-        self.show_sources(steam, qbit)
+        watched = self.watched()
+        found = {"steam": steam, "qbit": qbit, **launchers}
+        self.last = {k: st for k, st in found.items() if k in watched and st is not None}
+        self.show_sources()
         if self.armed != "downloads":
             return
         # An unreadable source counts as busy: better stay on than turn off too early.
-        busy = any(st is not None and (st.active or st.error) for st in (steam, qbit))
+        busy = any(st.active or st.error for st in self.last.values())
         if busy:
             self.idle_since = None
         elif self.idle_since is None:
@@ -761,14 +879,12 @@ class MainWindow(QWidget):
                 return self.tr_("armed_downloads", action=act)
             left = self.grace.value() * 60 - (time.time() - self.idle_since)
             return self.tr_("armed_quiet", action=act, left=fmt_left(left))
-        if self.mode() == "downloads" and not (self.steam.check.isChecked()
-                                               or self.qbit.check.isChecked()):
+        if self.mode() == "downloads" and not self.watched():
             return self.tr_("no_source")
         return self.tr_("idle_state")
 
     def watched_names(self):
-        return ", ".join(n for n, cb in (("Steam", self.steam.check), ("qBittorrent", self.qbit.check))
-                         if cb.isChecked())
+        return ", ".join(self.watched().values())
 
     def update_ui(self):
         busy = bool(self.armed or self.countdown)
@@ -881,6 +997,11 @@ def selftest(out_path):
         url = watchers.effective_qbit_url("http://localhost:8080")
         result["qbit_url"] = url
         result["qbit"] = asdict(watchers.QbitWatcher(watchers.QbitClient(url, timeout=2)).poll())
+        result["launchers_installed"] = watchers.installed_launchers()
+        lw = watchers.LauncherWatcher()
+        keys = {la.key for la in watchers.LAUNCHERS}
+        lw.poll(keys)
+        result["launchers"] = {k: asdict(v) for k, v in lw.poll(keys).items()}
         w = MainWindow()
         w.poller.stop()
         for lang in range(len(LANGS)):

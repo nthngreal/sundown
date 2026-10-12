@@ -1,6 +1,6 @@
 # Sundown
 
-**Turn the computer off when your Steam and qBittorrent downloads finish, or on a timer.**
+**Turn the computer off when your Steam, qBittorrent or game launcher downloads finish, or on a timer.**
 For Linux (KDE Plasma 6 and other systemd desktops) and Windows 10/11. No terminal, no
 admin rights.
 
@@ -39,6 +39,9 @@ the new place and the menu entry follows.
 - **When downloads finish:** watches Steam and qBittorrent and shows what is downloading
   right now (with progress for torrents). When nothing has downloaded for a few minutes (2 by default, so Steam can
   move on to the next game in its queue), it acts.
+- **Game launchers (Windows):** Battle.net, Epic Games, EA app, Ubisoft Connect, GOG Galaxy,
+  Riot Client and Rockstar Games. Pick them with *Game launchers*; installed ones are
+  ticked to begin with.
 - **In N minutes**, **at a time** (e.g. 23:30), or **now**.
 - A **60-second countdown with Cancel** always comes first, so nothing turns off by surprise.
 - While it waits, the computer is kept from going to sleep on its own.
@@ -70,6 +73,10 @@ torrents* if you want them to.
   running / downloading / staging / validating counts as downloading; queued updates that
   are not running and paused downloads do not. Steam updates the byte counters in these
   files only now and then, so Sundown shows no percentage for Steam.
+- **Game launchers:** they have no download API, so Sundown watches how much their own
+  processes read and write (for Battle.net, its update agent). Over 0.5 MB/s counts as
+  downloading; the "nothing for N minutes" wait covers the pauses between files. A
+  launcher that is busy for another reason, such as checking game files, also counts.
 - **qBittorrent:** asks the Web UI API (`/api/v2/torrents/info`) for torrents in the
   downloading, queued, metadata, checking and moving states.
 - If a watched source cannot be read (for example the qBittorrent Web UI is off while

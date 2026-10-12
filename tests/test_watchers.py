@@ -266,3 +266,40 @@ class QbitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LauncherTest(unittest.TestCase):
+    def test_rate(self):
+        t = [0.0]
+        procs = []
+        w = watchers.LauncherWatcher(sample=lambda: procs, clock=lambda: t[0])
+        keys = {"battlenet", "epic", "rockstar"}
+        st = w.poll(keys)
+        self.assertFalse(st["battlenet"].running)
+        # Battle.net's update agent; a generic "agent" elsewhere does not count.
+        procs[:] = [(1, "agent", r"C:\ProgramData\Battle.net\Agent\Agent.exe", 0),
+                    (2, "agent", r"C:\Other\agent.exe", 0),
+                    (3, "epicgameslauncher", r"C:\Epic\EpicGamesLauncher.exe", 0),
+                    (4, "launcher", r"C:\Some\launcher.exe", 0)]
+        st = w.poll(keys)
+        self.assertTrue(st["battlenet"].running and st["epic"].running)
+        self.assertFalse(st["rockstar"].running)
+        self.assertFalse(st["battlenet"].active)      # no rate on the first sample
+        t[0] = 3.0
+        procs[:] = [(1, "agent", r"C:\ProgramData\Battle.net\Agent\Agent.exe", 30_000_000),
+                    (2, "agent", r"C:\Other\agent.exe", 90_000_000),
+                    (3, "epicgameslauncher", r"C:\Epic\EpicGamesLauncher.exe", 100_000),
+                    (4, "launcher", r"C:\Some\launcher.exe", 0)]
+        st = w.poll(keys)
+        self.assertTrue(st["battlenet"].active)       # 10 MB/s
+        self.assertFalse(st["epic"].active)           # 33 KB/s: idle chatter
+        t[0] = 6.0
+        st = w.poll(keys)
+        self.assertFalse(st["battlenet"].active)      # nothing moved since
+        self.assertEqual(set(st), keys)
+
+    def test_unreadable_counters(self):
+        w = watchers.LauncherWatcher(sample=lambda: [(1, "upc", "", None)])
+        st = w.poll({"ubisoft"})["ubisoft"]
+        self.assertTrue(st.running)
+        self.assertEqual(st.error, "err_launcher_io")
